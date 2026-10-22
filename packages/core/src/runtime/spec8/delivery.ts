@@ -129,6 +129,7 @@ import { runIdCreatedAt } from '../run-id-time.js';
 import {
   ackRefusedStartHookCandidate,
   admitsTurboStart,
+  retriesRunlessRunStarted,
 } from '../start-hook-delivery.js';
 import { computeStepLatencyTracking } from '../step-latency.js';
 import { useQuickJSVm } from '../vm-mode.js';
@@ -568,6 +569,10 @@ export async function runSpec8Delivery(
   };
 
   const recordWorkflowSetupFailure = async (err: unknown): Promise<boolean> => {
+    if (retriesRunlessRunStarted(err, runId)) {
+      span?.setAttributes(Attribute.WorkflowRunStartedRunlessResponse(true));
+      return false;
+    }
     const errorCode = getWorkflowSetupErrorCode(err);
     if (!errorCode) return false;
     await recordFatalRunError({
