@@ -610,6 +610,14 @@ describe('start({ hook })', () => {
 
   it.each([
     ['a 5xx', new WorkflowWorldError('down', { status: 500 })],
+    [
+      'an outcome the World could not settle',
+      new WorkflowWorldError('in-band outcome unknown', {
+        status: 503,
+        code: 'in-band-outcome-unknown',
+        retryAfter: 1,
+      }),
+    ],
     ['contention', new ThrottleError('busy')],
     ['a timeout', new WorkflowWorldError('slow', { code: 'TIMEOUT' })],
   ])('reports an uncertain admission on %s', async (_label, cause) => {

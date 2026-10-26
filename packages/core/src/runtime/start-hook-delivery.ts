@@ -59,6 +59,10 @@ export function ackRefusedStartHookCandidate(
  * by `start()`, which the queue-first order of `start({ hook })` makes
  * reachable. A redelivery finds the run whole, so the delivery retries
  * instead of failing the run. Every other schema violation stays fatal.
+ *
+ * A backend with workflow-server#1307 answers that case with a 503
+ * `in-band-outcome-unknown` instead, which setup already rethrows for
+ * redelivery; this covers backends without it.
  */
 export function isRunlessRunStartedResponse(err: unknown): boolean {
   if (!WorkflowWorldError.is(err) || err.status !== undefined) return false;

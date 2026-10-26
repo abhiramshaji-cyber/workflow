@@ -60,7 +60,9 @@ async function candidate(
    * Answer the first `run_started` without its run, as a backend did for a
    * `run_started` that overtook `run_created`: before or after committing it.
    */
-  runlessOnce?: 'before-commit' | 'after-commit'
+  runlessOnce?: 'before-commit' | 'after-commit',
+  /** The error the first `run_started` answers with (default: run-less). */
+  firstAnswer: () => unknown = runlessResponse
 ) {
   const runId = `wrun_${ulid()}`;
   const input = await dehydrateWorkflowArguments([1], runId, undefined, []);
@@ -108,9 +110,9 @@ async function candidate(
     asWorld.events.create = (async (...args: Parameters<typeof create>) => {
       const first = args[1].eventType === 'run_started' && !answered;
       if (first) answered = true;
-      if (first && runlessOnce === 'before-commit') throw runlessResponse();
+      if (first && runlessOnce === 'before-commit') throw firstAnswer();
       const result = await create(...args);
-      if (first) throw runlessResponse();
+      if (first) throw firstAnswer();
       return result;
     }) as typeof create;
   }
@@ -255,6 +257,34 @@ describe.each([
     expect(types).toContain('run_completed');
     expect(types).not.toContain('run_failed');
     expect(types.filter((t) => t === 'run_started')).toHaveLength(1);
+  });
+
+  it.each([
+    'before-commit',
+    'after-commit',
+  ] as const)('redelivers a run_started whose outcome the World could not settle (%s), never acknowledging it as a refusal', async (when) => {
+    const { world, start } = await candidate(
+      'accept',
+      0,
+      when,
+      () =>
+        new WorkflowWorldError('in-band outcome unknown', {
+          status: 503,
+          code: 'in-band-outcome-unknown',
+          retryAfter: 1,
+        })
+    );
+
+    await expect(world.deliver(start)).rejects.toMatchObject({ status: 503 });
+    // Held for redelivery, not acknowledged; no step body ran, no run_failed.
+    expect(world.held.length).toBe(1);
+    expect(bodies).toBe(0);
+    expect(world.events.map((e) => e.eventType)).not.toContain('run_failed');
+
+    await world.runUntilIdle();
+    const types = world.events.map((e) => e.eventType);
+    expect(types).toContain('run_completed');
+    expect(types).not.toContain('run_failed');
   });
 
   describe.each(nonFirst)('on %s of an undecided candidate', (_label, as) => {

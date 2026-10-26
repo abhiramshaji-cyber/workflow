@@ -310,6 +310,32 @@ describe('queued copy of a start Hook candidate', () => {
     });
   });
 
+  it('rethrows a run_started whose outcome the World could not settle, for redelivery', async () => {
+    const sink: any[] = [];
+    const outcome = await deliver({
+      startHook,
+      sink,
+      runStarted: async () => {
+        throw new WorkflowWorldError('in-band outcome unknown', {
+          status: 503,
+          code: 'in-band-outcome-unknown',
+          retryAfter: 1,
+        });
+      },
+    }).catch((e: unknown) => e);
+
+    // Not an admission answer: neither acknowledged nor a failed run.
+    expect(WorkflowWorldError.is(outcome)).toBe(true);
+    expect(outcome).toMatchObject({ status: 503 });
+    expect(sink.map((e) => e.eventType)).toEqual(['run_started']);
+
+    const { created } = await deliver({
+      startHook,
+      runStarted: async () => {},
+    });
+    expect(completed(created)).toBe(true);
+  });
+
   it('runs the admitted candidate normally', async () => {
     vi.stubEnv('WORKFLOW_TURBO', '0');
     const { created } = await deliver({
