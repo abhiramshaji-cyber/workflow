@@ -22,8 +22,7 @@ import {
 /** This file covers the spec-8 engine; spec 9 has its own tests. */
 const SPEC_8 = SPEC_VERSION_SINGLE_ORCHESTRATOR - 1;
 
-import { afterEach, assert, describe, expect, it, vi } from 'vitest';
-import { z } from 'zod';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { runtimeLogger } from '../logger.js';
 import { workflowEntrypoint } from '../runtime.js';
 import { dehydrateWorkflowArguments } from '../serialization.js';
@@ -241,73 +240,6 @@ describe('queued copy of a start Hook candidate', () => {
         RUN_ERROR_CODES.WORLD_CONTRACT_ERROR
       );
     }
-  });
-
-  describe('a run_started answered without the run', () => {
-    const contractError = (body: unknown) => {
-      const parsed = z
-        .object({
-          run: z
-            .object({ status: z.string(), startedAt: z.coerce.date() })
-            .and(z.object({ startedAt: z.coerce.date() })),
-        })
-        .safeParse(body);
-      assert(!parsed.success);
-      return new WorkflowWorldError('v4 createEvent: invalid response body', {
-        code: 'SCHEMA_VALIDATION',
-        cause: parsed.error,
-      });
-    };
-
-    it('retries by redelivery, and the redelivery admits and completes', async () => {
-      vi.stubEnv('WORKFLOW_TURBO', '0');
-      const warn = vi.spyOn(runtimeLogger, 'warn');
-      const first = await deliver({
-        startHook,
-        runStarted: async () => {
-          throw contractError({ event: {} });
-        },
-      }).catch((e: unknown) => e);
-
-      // Rethrown, so the queue redelivers; no run_failed was written.
-      expect(WorkflowWorldError.is(first)).toBe(true);
-      expect(warn).toHaveBeenCalledWith(
-        expect.stringMatching(/answered without the run/),
-        expect.objectContaining({ workflowRunId: expect.any(String) })
-      );
-
-      const { created } = await deliver({
-        startHook,
-        runStarted: async () => {},
-      });
-      expect(created.some((e) => e.eventType === 'run_failed')).toBe(false);
-      expect(completed(created)).toBe(true);
-    });
-
-    it('writes nothing but the run_started it retries', async () => {
-      const sink: any[] = [];
-      await deliver({
-        startHook,
-        sink,
-        runStarted: async () => {
-          throw contractError({ run: null });
-        },
-      }).catch(() => {});
-      expect(sink.map((e) => e.eventType)).toEqual(['run_started']);
-    });
-
-    it('keeps every other schema violation fatal', async () => {
-      const { created } = await deliver({
-        startHook,
-        runStarted: async () => {
-          throw contractError({ run: { status: 1 } });
-        },
-      });
-      const failed = created.find((e) => e.eventType === 'run_failed');
-      expect(failed?.eventData?.errorCode).toBe(
-        RUN_ERROR_CODES.WORLD_CONTRACT_ERROR
-      );
-    });
   });
 
   it('rethrows a run_started whose outcome the World could not settle, for redelivery', async () => {

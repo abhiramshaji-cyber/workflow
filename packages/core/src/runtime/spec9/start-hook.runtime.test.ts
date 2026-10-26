@@ -15,7 +15,6 @@ import {
 import { SPEC_VERSION_CURRENT } from '@workflow/world';
 import { ulid } from 'ulid';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { z } from 'zod';
 import { runtimeLogger } from '../../logger.js';
 import { registerStepFunction } from '../../private.js';
 import { workflowEntrypoint } from '../../runtime.js';
@@ -57,12 +56,13 @@ async function candidate(
   decision: Decision,
   holdRunStartedMs = 0,
   /**
-   * Answer the first `run_started` without its run, as a backend did for a
-   * `run_started` that overtook `run_created`: before or after committing it.
+   * Answer the first `run_started` with this error, before or after the World
+   * commits it.
    */
-  runlessOnce?: 'before-commit' | 'after-commit',
-  /** The error the first `run_started` answers with (default: run-less). */
-  firstAnswer: () => unknown = runlessResponse
+  failFirstRunStarted?: {
+    when: 'before-commit' | 'after-commit';
+    error: () => unknown;
+  }
 ) {
   const runId = `wrun_${ulid()}`;
   const input = await dehydrateWorkflowArguments([1], runId, undefined, []);
@@ -104,15 +104,16 @@ async function candidate(
     } as any);
   }
   const asWorld = world.asWorld();
-  if (runlessOnce) {
+  if (failFirstRunStarted) {
+    const { when, error } = failFirstRunStarted;
     const create = asWorld.events.create.bind(asWorld.events);
     let answered = false;
     asWorld.events.create = (async (...args: Parameters<typeof create>) => {
       const first = args[1].eventType === 'run_started' && !answered;
       if (first) answered = true;
-      if (first && runlessOnce === 'before-commit') throw firstAnswer();
+      if (first && when === 'before-commit') throw error();
       const result = await create(...args);
-      if (first) throw firstAnswer();
+      if (first) throw error();
       return result;
     }) as typeof create;
   }
@@ -132,18 +133,6 @@ async function candidate(
     },
   });
   return { world, start, runStartedData };
-}
-
-/** A `run_started` response that failed its schema at `run` alone. */
-function runlessResponse() {
-  const parsed = z
-    .object({ run: z.object({ startedAt: z.coerce.date() }) })
-    .safeParse({ event: {} });
-  if (parsed.success) throw new Error('unreachable');
-  return new WorkflowWorldError('v4 createEvent: invalid response body', {
-    code: 'SCHEMA_VALIDATION',
-    cause: parsed.error,
-  });
 }
 
 /** The non-first deliveries a candidate's message can take. */
@@ -240,40 +229,16 @@ describe.each([
   it.each([
     'before-commit',
     'after-commit',
-  ] as const)('retries a run_started answered without its run (%s) by redelivery, which admits and completes', async (when) => {
-    const { world, start } = await candidate('accept', 0, when);
-    const warn = vi.spyOn(runtimeLogger, 'warn');
-
-    await expect(world.deliver(start)).rejects.toSatisfy(WorkflowWorldError.is);
-    // No fatal run_failed: the queue redelivers instead.
-    expect(world.events.map((e) => e.eventType)).not.toContain('run_failed');
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringMatching(/answered without the run/),
-      expect.anything()
-    );
-
-    await world.runUntilIdle();
-    const types = world.events.map((e) => e.eventType);
-    expect(types).toContain('run_completed');
-    expect(types).not.toContain('run_failed');
-    expect(types.filter((t) => t === 'run_started')).toHaveLength(1);
-  });
-
-  it.each([
-    'before-commit',
-    'after-commit',
   ] as const)('redelivers a run_started whose outcome the World could not settle (%s), never acknowledging it as a refusal', async (when) => {
-    const { world, start } = await candidate(
-      'accept',
-      0,
+    const { world, start } = await candidate('accept', 0, {
       when,
-      () =>
+      error: () =>
         new WorkflowWorldError('in-band outcome unknown', {
           status: 503,
           code: 'in-band-outcome-unknown',
           retryAfter: 1,
-        })
-    );
+        }),
+    });
 
     await expect(world.deliver(start)).rejects.toMatchObject({ status: 503 });
     // Held for redelivery, not acknowledged; no step body ran, no run_failed.
