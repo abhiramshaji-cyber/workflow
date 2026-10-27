@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   HookConflictError,
+  HookNotFoundError,
   HookReservedError,
   START_HOOK_ADMISSION_REJECTED,
 } from '@workflow/errors';
@@ -387,6 +388,76 @@ describe('atomic start Hook (world-local)', () => {
     const listed = await storage.runs.list({});
     expect(listed.data.map((r) => r.runId)).not.toContain(stalled);
     expect(listed.data.map((r) => r.runId)).toHaveLength(1);
+  });
+
+  it('fences an orphan before a lookup past the grace answers not found, so the answer stays', async () => {
+    const token = 'order:looked-up';
+    const orphan = `wrun_${ulid()}`;
+    // A writer claimed the token and died before writing the run; its queued
+    // copy has not been delivered yet.
+    const claimPath = hookTokenClaimPath(testDir, token);
+    await fs.mkdir(path.dirname(claimPath), { recursive: true });
+    await writeExclusive(
+      claimPath,
+      JSON.stringify({ runId: orphan, reservation: { reservedAt: Date.now() } })
+    );
+    const lookup = () =>
+      storage.hooks.getByToken(token).catch((e: unknown) => e);
+
+    expect(HookReservedError.is(await lookup())).toBe(true);
+
+    vi.useFakeTimers({ toFake: ['Date'], shouldAdvanceTime: true });
+    try {
+      vi.setSystemTime(Date.now() + START_HOOK_ORPHAN_GRACE_MS + 5_000);
+      expect(HookNotFoundError.is(await lookup())).toBe(true);
+
+      // The late queued copy can no longer create the run.
+      const queued = await create(orphan, creating('run_started', token)).catch(
+        (e: unknown) => e
+      );
+      expect(queued).toMatchObject({ code: START_HOOK_ADMISSION_REJECTED });
+      expect(HookNotFoundError.is(await lookup())).toBe(true);
+
+      // The token is free for a new owner.
+      const next = `wrun_${ulid()}`;
+      expect(
+        (await create(next, creating('run_created', token))).run?.runId
+      ).toBe(next);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fences a cancelled run id only while it could still be created', async () => {
+    const cancel = (runId: string) =>
+      create(runId, {
+        eventType: 'run_cancelled',
+        specVersion: SPEC,
+      } as AnyEventRequest).catch((e: unknown) => e);
+    const runFile = (runId: string) =>
+      fs
+        .readdir(path.join(testDir, 'runs'))
+        .then((names) => names.some((n) => n.startsWith(runId)))
+        .catch(() => false);
+
+    const old = `wrun_${ulid(Date.now() - 2 * 24 * 3600_000)}`;
+    expect(await cancel(old)).toMatchObject({
+      name: 'WorkflowRunNotFoundError',
+    });
+    expect(await runFile(old)).toBe(false);
+    expect(await cancel('wrun_not-a-ulid')).toMatchObject({
+      name: 'WorkflowRunNotFoundError',
+    });
+
+    const young = `wrun_${ulid()}`;
+    expect(await cancel(young)).toMatchObject({
+      name: 'WorkflowRunNotFoundError',
+    });
+    expect(await runFile(young)).toBe(true);
+    // Never listed as a run.
+    expect(
+      (await storage.runs.list({})).data.some((r) => r.runId === young)
+    ).toBe(false);
   });
 
   it('refuses a queued candidate older than the orphan bound with a permanent code', async () => {

@@ -1,6 +1,7 @@
 import {
   EntityConflictError,
   FatalError,
+  START_HOOK_CANDIDATE_CANCELLED,
   WorkflowRunFailedError,
   WorkflowRunNotFoundError,
   WorkflowWorldError,
@@ -188,6 +189,61 @@ describe('reenqueueRun', () => {
       { runId: 'wrun_123', runSpecVersion: 2 },
       expect.anything()
     );
+  });
+});
+
+describe('cancelRun of a run that does not exist', () => {
+  function missingRunWorld(
+    cancelAnswer: () => Promise<unknown>,
+    atomicStartHook = true
+  ) {
+    const world = createMockWorld();
+    if (atomicStartHook) {
+      (world as { capabilities?: unknown }).capabilities = {
+        atomicStartHook: { active: true },
+      };
+    }
+    vi.mocked(world.runs.get).mockRejectedValue(
+      new WorkflowRunNotFoundError('wrun_123')
+    );
+    vi.mocked(world.events.create).mockImplementation(
+      cancelAnswer as typeof world.events.create
+    );
+    return world;
+  }
+
+  it('still posts run_cancelled, at this SDK version, and succeeds for a fenced start Hook candidate', async () => {
+    const world = missingRunWorld(async () => {
+      throw new WorkflowWorldError('cancelled before it was created', {
+        status: 409,
+        code: START_HOOK_CANDIDATE_CANCELLED,
+      });
+    });
+
+    await cancelRun(world, 'wrun_123');
+
+    expect(vi.mocked(world.events.create).mock.calls[0][1]).toMatchObject({
+      eventType: 'run_cancelled',
+      specVersion: SPEC_VERSION_CURRENT,
+    });
+  });
+
+  it('posts nothing on a World without start Hooks', async () => {
+    const world = missingRunWorld(async () => undefined, false);
+
+    await expect(cancelRun(world, 'wrun_123')).rejects.toThrow(
+      /Failed to cancel run/
+    );
+    expect(world.events.create).not.toHaveBeenCalled();
+  });
+
+  it('throws a typed WorkflowRunNotFoundError when the World has no such run either', async () => {
+    const world = missingRunWorld(async () => {
+      throw new WorkflowRunNotFoundError('wrun_123');
+    });
+
+    const error = await cancelRun(world, 'wrun_123').catch((e: unknown) => e);
+    expect(WorkflowRunNotFoundError.is(error)).toBe(true);
   });
 });
 

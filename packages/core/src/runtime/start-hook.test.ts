@@ -3,6 +3,7 @@ import {
   FatalError,
   HookConflictError,
   RUN_ERROR_CODES,
+  START_HOOK_ADMISSION_DISABLED,
   START_HOOK_ADMISSION_REJECTED,
   ThrottleError,
   WorkflowError,
@@ -401,8 +402,9 @@ describe('start({ hook })', () => {
       expect(HookConflictError.is(error)).toBe(true);
       expect(error).toMatchObject({ conflictingRunId: 'wrun_owner' });
       expect(get).toHaveBeenCalledWith('wrun_owner', { resolveData: 'none' });
-      // The candidate's own publish, then the holder's wake.
-      expect(queue).toHaveBeenCalledTimes(2);
+      // The candidate's own publish, then the holder's wake (in the
+      // background).
+      await vi.waitFor(() => expect(queue).toHaveBeenCalledTimes(2));
       const [queueName, payload, opts] = queue.mock.calls[1];
       expect(queueName).toBe(
         getWorkflowQueueName('workflow//./test//orders', 'eve')
@@ -419,6 +421,18 @@ describe('start({ hook })', () => {
         specVersion: 8,
         idempotencyKey: startHookHolderWakeKey('wrun_owner', Date.now()),
       });
+    });
+
+    it('throws the conflict without waiting for the holder lookup', async () => {
+      const get = vi.fn(() => new Promise(() => {}));
+      refusingWorld(get);
+
+      const error = await rejection(
+        start(workflow, [], { hook: { token: TOKEN } })
+      );
+
+      expect(HookConflictError.is(error)).toBe(true);
+      expect(get).toHaveBeenCalled();
     });
 
     it.each([
@@ -463,6 +477,8 @@ describe('start({ hook })', () => {
       );
 
       expect(HookConflictError.is(error)).toBe(true);
+      // Let the background wake settle before checking it published nothing.
+      await new Promise((r) => setTimeout(r, 10));
       expect(queue).toHaveBeenCalledTimes(1);
     });
 
@@ -476,6 +492,8 @@ describe('start({ hook })', () => {
       );
 
       expect(HookConflictError.is(error)).toBe(true);
+      // Let the background wake settle before checking it published nothing.
+      await new Promise((r) => setTimeout(r, 10));
       expect(queue).toHaveBeenCalledTimes(1);
     });
 
@@ -544,7 +562,7 @@ describe('start({ hook })', () => {
       new WorkflowWorldError('reset', { code: 'TRANSPORT' }),
     ],
     ['a non-World error', new Error('socket hang up')],
-  ])('reports an uncertain queue on %s, without admitting', async (_label, cause) => {
+  ])('reports an uncertain queue on %s once publishing the admitted candidate again fails', async (_label, cause) => {
     admittingWorld();
     queue.mockRejectedValue(cause);
 
@@ -555,7 +573,11 @@ describe('start({ hook })', () => {
     expect(WorkflowStartError.is(error)).toBe(true);
     expect(error).toMatchObject({ stage: 'queue', cause });
     expect((error as WorkflowStartError).runId).toMatch(/^wrun_/);
-    expect(eventsCreate).not.toHaveBeenCalled();
+    // Decided anyway, then published again with backoff.
+    expect(eventsCreate).toHaveBeenCalledTimes(1);
+    expect(queue).toHaveBeenCalledTimes(
+      2 + START_HOOK_CONFIRM_DELAYS_MS.length
+    );
   });
 
   it('is a WorkflowError, never a World error a caller would call permanent', async () => {
@@ -620,7 +642,14 @@ describe('start({ hook })', () => {
     ],
     ['contention', new ThrottleError('busy')],
     ['a timeout', new WorkflowWorldError('slow', { code: 'TIMEOUT' })],
-  ])('reports an uncertain admission on %s', async (_label, cause) => {
+    [
+      'admission switched off, with nothing recorded',
+      new WorkflowWorldError('disabled', {
+        status: 400,
+        code: START_HOOK_ADMISSION_DISABLED,
+      }),
+    ],
+  ])('reports an uncertain admission on %s, after re-posting the same candidate', async (_label, cause) => {
     admittingWorld();
     eventsCreate.mockRejectedValue(cause);
 
@@ -629,15 +658,20 @@ describe('start({ hook })', () => {
     );
 
     expect(WorkflowStartError.is(error)).toBe(true);
-    expect(error).toMatchObject({ stage: 'admission' });
-    expect((error as WorkflowStartError).runId).toBe(
-      queue.mock.calls[0][1].runId
+    expect(error).toMatchObject({ stage: 'admission', cause });
+    const runId = queue.mock.calls[0][1].runId;
+    expect((error as WorkflowStartError).runId).toBe(runId);
+    expect(eventsCreate).toHaveBeenCalledTimes(
+      1 + START_HOOK_CONFIRM_DELAYS_MS.length
+    );
+    expect(new Set(eventsCreate.mock.calls.map(([id]) => id))).toEqual(
+      new Set([runId])
     );
   });
 
   it('rethrows a permanent admission rejection as-is', async () => {
     admittingWorld();
-    const cause = new WorkflowWorldError('disabled', {
+    const cause = new WorkflowWorldError('too old', {
       status: 400,
       code: START_HOOK_ADMISSION_REJECTED,
     });

@@ -2,6 +2,7 @@ import {
   EntityConflictError,
   HookConflictError,
   RUN_ERROR_CODES,
+  START_HOOK_ADMISSION_DISABLED,
   START_HOOK_ADMISSION_REJECTED,
   WorkflowRuntimeError,
   WorkflowStartError,
@@ -482,11 +483,12 @@ function assertTargetAdmitsStartHook(
 }
 
 /**
- * Backoff between the re-posts with which a streamed `start({ hook })`
- * confirms an uncertain admission before throwing `WorkflowStartError`. Its
- * stream arguments are piped only on a confirmed admission, so giving up at
- * the first uncertain answer would leave an owner that was in fact admitted
- * waiting on input nothing will send.
+ * Backoff between the re-posts with which `start({ hook })` confirms an
+ * uncertain admission before throwing `WorkflowStartError`. The decision
+ * replays, so re-posting the same candidate is free and learns it. Giving up
+ * at the first uncertain answer would leave a streamed owner that was in fact
+ * admitted waiting on input nothing will send, and would send a caller (a
+ * step's retry, with a new run ID) into a conflict naming its own run.
  */
 export const START_HOOK_CONFIRM_DELAYS_MS: readonly number[] = [100, 300, 900];
 
@@ -1541,12 +1543,9 @@ export async function start<TArgs extends unknown[], TResult>(
         // registered for flushing on all of them, so the gated stream ops
         // always settle.
         const gate = streamStartGate as PromiseWithResolvers<boolean>;
-        // Stream arguments registered their gated pipes in `ops`, and their
-        // producers run only from here. So a streamed start confirms an
-        // uncertain admission in place (`START_HOOK_CONFIRM_DELAYS_MS`)
-        // before giving up, rather than leave an admitted owner waiting on
-        // input that nothing will send.
-        const streamed = ops.length > 0;
+        // An uncertain admission is confirmed in place
+        // (`START_HOOK_CONFIRM_DELAYS_MS`) before giving up: stream arguments
+        // registered their gated pipes in `ops` and pipe only once admitted.
         flushArgumentStreams();
         span?.setAttributes({
           ...Attribute.WorkflowRunId(runId),
@@ -1565,7 +1564,6 @@ export async function start<TArgs extends unknown[], TResult>(
             );
             // A permanent refusal published nothing; anything else may have.
             if (isPermanentWorldError(error)) throw error;
-            if (!streamed) throw new WorkflowStartError(runId, 'queue', error);
             // Decide the candidate anyway: its queued copy may exist, and
             // an accepted candidate is published again below.
             enqueueFailure = { error };
@@ -1589,15 +1587,19 @@ export async function start<TArgs extends unknown[], TResult>(
                     `The World refused start Hook candidate "${runId}" without naming the run that owns the token.`
                   );
                 }
+                // Say what happened to this start, without the token (the
+                // message becomes the span's status).
+                error.message = `No run was created: workflow run "${error.conflictingRunId}" already owns this hook token`;
                 // A holder stuck pending (its first message lost) would hold
-                // the token forever: wake it. Best effort; the refusal stands.
-                const wake = await wakePendingStartHookHolder(
-                  world,
-                  error.conflictingRunId,
-                  traceCarrier
-                );
-                span?.setAttributes(
-                  Attribute.WorkflowStartHookHolderWoken(wake === 'woken')
+                // the token forever: wake it. Best effort and in the
+                // background, so the refusal is thrown without waiting.
+                safeWaitUntil(
+                  wakePendingStartHookHolder(
+                    world,
+                    error.conflictingRunId,
+                    traceCarrier
+                  ),
+                  () => {}
                 );
                 throw error;
               }
@@ -1613,14 +1615,18 @@ export async function start<TArgs extends unknown[], TResult>(
               }
               // A permanent answer (a validation 400, or
               // START_HOOK_ADMISSION_REJECTED) is the candidate's outcome: the
-              // queued copy gets the same answer and creates nothing.
-              if (isPermanentWorldError(error)) {
+              // queued copy gets the same answer and creates nothing. A
+              // kill-switch answer recorded nothing, so it is not final.
+              if (
+                isPermanentWorldError(error) &&
+                error.code !== START_HOOK_ADMISSION_DISABLED
+              ) {
                 span?.setAttributes(
                   Attribute.WorkflowStartHookOutcome('failed')
                 );
                 throw error;
               }
-              if (streamed && attempt < START_HOOK_CONFIRM_DELAYS_MS.length) {
+              if (attempt < START_HOOK_CONFIRM_DELAYS_MS.length) {
                 // The decision replays: re-posting the same candidate learns
                 // it whether or not the last attempt committed.
                 await sleep(START_HOOK_CONFIRM_DELAYS_MS[attempt]);

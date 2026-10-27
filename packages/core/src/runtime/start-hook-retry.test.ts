@@ -59,29 +59,43 @@ afterEach(async () => {
 });
 
 describe('a step retrying start({ hook })', () => {
-  it('ends with exactly one run after an uncertain admission', async () => {
+  /** world-local, losing the first `lose` `run_created` responses. */
+  function lossyWorld(lose: number) {
     const local = createLocalWorld({ dataDir: dir });
-    let loseNextAdmissionResponse = true;
+    let lost = 0;
     const queue = vi.fn(async () => ({ messageId: null }));
-    const world = {
-      ...local,
-      queue,
-      events: {
-        ...local.events,
-        create: (async (runId: any, data: any, params: any) => {
-          const result = await local.events.create(runId, data, params);
-          if (data.eventType === 'run_created' && loseNextAdmissionResponse) {
-            // Committed, but the caller never hears back.
-            loseNextAdmissionResponse = false;
-            throw new WorkflowWorldError('gateway timeout', { status: 504 });
-          }
-          return result;
-        }) as typeof local.events.create,
-      },
-    };
-    setWorld(world as any);
+    const create = vi.fn((async (runId: any, data: any, params: any) => {
+      const result = await local.events.create(runId, data, params);
+      if (data.eventType === 'run_created' && lost < lose) {
+        // Committed, but the caller never hears back.
+        lost++;
+        throw new WorkflowWorldError('gateway timeout', { status: 504 });
+      }
+      return result;
+    }) as typeof local.events.create);
+    setWorld({ ...local, queue, events: { ...local.events, create } } as any);
+    return { local, queue, create };
+  }
 
-    // Attempt 1: admitted, but the response was lost. Retryable.
+  it('confirms in place an admission whose response was lost', async () => {
+    const { local, create } = lossyWorld(1);
+
+    // Re-posting the same candidate learns its decision: admitted.
+    const run = await stepAttempt(1, () =>
+      start(workflow, ['a'], { hook: { token: TOKEN } })
+    );
+
+    const runs = await local.runs.list({});
+    expect(runs.data.map((r) => r.runId)).toEqual([run.runId]);
+    expect(
+      create.mock.calls.filter(([, data]) => data.eventType === 'run_created')
+    ).toHaveLength(2);
+  });
+
+  it('ends with exactly one run after an admission it could not confirm', async () => {
+    const { local, queue } = lossyWorld(4);
+
+    // Attempt 1: admitted, but every confirmation was lost. Retryable.
     const first = await stepAttempt(1, () =>
       start(workflow, ['a'], { hook: { token: TOKEN } })
     ).catch((e: unknown) => e);
@@ -102,7 +116,7 @@ describe('a step retrying start({ hook })', () => {
     expect(queue).toHaveBeenCalledTimes(2);
   });
 
-  it('admits the retry when the uncertain attempt was never admitted', async () => {
+  it('decides the candidate after an uncertain publish, and publishes it again', async () => {
     const local = createLocalWorld({ dataDir: dir });
     let failNextQueue = true;
     const queue = vi.fn(async () => {
@@ -114,15 +128,12 @@ describe('a step retrying start({ hook })', () => {
     });
     setWorld({ ...local, queue } as any);
 
-    const first = await stepAttempt(1, () =>
-      start(workflow, [], { hook: { token: TOKEN } })
-    ).catch((e: unknown) => e);
-    expect(first).toMatchObject({ stage: 'queue' });
-
-    const run = await stepAttempt(2, () =>
+    const run = await stepAttempt(1, () =>
       start(workflow, [], { hook: { token: TOKEN } })
     );
+
     const runs = await local.runs.list({});
     expect(runs.data.map((r) => r.runId)).toEqual([run.runId]);
+    expect(queue).toHaveBeenCalledTimes(2);
   });
 });

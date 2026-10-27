@@ -28,7 +28,9 @@ import {
   InBandSupersededError,
   PreconditionFailedError,
   RunExpiredError,
+  START_HOOK_ADMISSION_DISABLED,
   START_HOOK_ADMISSION_REJECTED,
+  START_HOOK_CANDIDATE_CANCELLED,
   StreamError,
   StreamExpiredError,
   ThrottleError,
@@ -390,8 +392,13 @@ export function inBandCounter(value: unknown): number | undefined {
  *   - 409 with code `start-hook-conflict` → HookConflictError naming the
  *     token's owner (a refused `start({ hook })` candidate)
  *   - 409 → EntityConflictError (start() dedupe, terminal-state transitions)
- *   - 400 with code `start-hook-admission-rejected` or `start-hook-disabled`
- *     → WorkflowWorldError with code START_HOOK_ADMISSION_REJECTED (permanent)
+ *   - 400 with code `start-hook-admission-rejected` → WorkflowWorldError with
+ *     code START_HOOK_ADMISSION_REJECTED (permanent)
+ *   - 400 with code `start-hook-disabled` → WorkflowWorldError with code
+ *     START_HOOK_ADMISSION_DISABLED (not final: nothing was recorded)
+ *   - 409 with code `start-hook-candidate-cancelled` → WorkflowWorldError
+ *     with code START_HOOK_CANDIDATE_CANCELLED (a cancel fenced a candidate
+ *     that never became a run)
  *   - 410 → StreamExpiredError when the response code is `stream-expired`,
  *     otherwise RunExpiredError (both terminal)
  *   - 412 with code `in-band-superseded` → InBandSupersededError (the in-band
@@ -459,18 +466,30 @@ export function errorForResponse(
         : undefined
     );
   }
-  if (
-    status === 400 &&
-    (code === START_HOOK_WIRE_CODES.admissionRejected ||
-      code === START_HOOK_WIRE_CODES.disabled)
-  ) {
-    // Permanent: the backend will never admit this start Hook request (or
-    // has admission switched off). The distinct code lets the queued copy of
-    // the candidate stop retrying without swallowing unrelated 400s.
+  if (status === 400 && code === START_HOOK_WIRE_CODES.admissionRejected) {
+    // Permanent: the backend will never admit this start Hook request. The
+    // distinct code lets the queued copy of the candidate stop retrying
+    // without swallowing unrelated 400s.
     return new WorkflowWorldError(message, {
       url,
       status,
       code: START_HOOK_ADMISSION_REJECTED,
+    });
+  }
+  if (status === 400 && code === START_HOOK_WIRE_CODES.disabled) {
+    // Admission is switched off and nothing was recorded for the candidate:
+    // not final, since another copy may be admitted once it is back on.
+    return new WorkflowWorldError(message, {
+      url,
+      status,
+      code: START_HOOK_ADMISSION_DISABLED,
+    });
+  }
+  if (status === 409 && code === START_HOOK_WIRE_CODES.candidateCancelled) {
+    return new WorkflowWorldError(message, {
+      url,
+      status,
+      code: START_HOOK_CANDIDATE_CANCELLED,
     });
   }
   if (status === 409) return new EntityConflictError(message);

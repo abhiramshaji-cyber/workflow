@@ -9,7 +9,9 @@
 import {
   EntityConflictError,
   HookConflictError,
+  START_HOOK_ADMISSION_DISABLED,
   START_HOOK_ADMISSION_REJECTED,
+  ThrottleError,
   WorkflowWorldError,
 } from '@workflow/errors';
 import { SPEC_VERSION_CURRENT } from '@workflow/world';
@@ -43,14 +45,21 @@ const oneStep = `const step = globalThis[Symbol.for("WORKFLOW_USE_STEP")]("start
   async function workflow(n) { return await step(n); }
   ;globalThis.__private_workflows = new Map([["workflow", workflow]]);`;
 
-type Decision = 'accept' | 'refuse' | 'reject' | 'finished';
+type Decision =
+  | 'accept'
+  | 'refuse'
+  | 'reject'
+  | 'disabled'
+  | 'finished'
+  | 'admit-on-run-started';
 
 /**
  * A candidate and its first orchestrator message, carrying
  * `runInput.startHook`. Undecided unless `accept`: no `run_created` landed
  * (the direct write is still in flight or failed), and the World decides on
  * the `run_started` the delivery writes. `accept` is a candidate the direct
- * `run_created` already admitted.
+ * `run_created` already admitted; `admit-on-run-started` one that only the
+ * queued copy's `run_started` admits.
  */
 async function candidate(
   decision: Decision,
@@ -78,6 +87,12 @@ async function candidate(
       }
       if (decision === 'refuse') {
         throw new HookConflictError(TOKEN, 'wrun_owner');
+      }
+      if (decision === 'disabled') {
+        throw new WorkflowWorldError('disabled', {
+          status: 400,
+          code: START_HOOK_ADMISSION_DISABLED,
+        });
       }
       if (decision === 'reject') {
         throw new WorkflowWorldError('disabled', {
@@ -213,6 +228,17 @@ describe.each([
     );
   });
 
+  it('redelivers a kill-switch answer, which recorded nothing for the candidate', async () => {
+    const { world, start } = await candidate('disabled');
+
+    await expect(world.deliver(start)).rejects.toMatchObject({
+      code: START_HOOK_ADMISSION_DISABLED,
+    });
+    // Held for redelivery, not acknowledged; nothing ran.
+    expect(world.held.length).toBe(1);
+    expect(bodies).toBe(0);
+  });
+
   it('keeps the ordinary handling of a run that already finished', async () => {
     const { world, start } = await candidate('finished');
     const info = vi.spyOn(runtimeLogger, 'info');
@@ -250,6 +276,51 @@ describe.each([
     const types = world.events.map((e) => e.eventType);
     expect(types).toContain('run_completed');
     expect(types).not.toContain('run_failed');
+  });
+
+  // A World that continues a message on a new one (world-vercel near the
+  // message's expiry, or its handoff bound) does so only for a delivery that
+  // asked for a handoff, and the continuation drops `runInput`. So no exit
+  // before admission may be a handoff: each must be a redelivery of the same
+  // message, which still carries the reservation.
+  it.each([
+    [
+      '503',
+      () =>
+        new WorkflowWorldError('unavailable', { status: 503, retryAfter: 1 }),
+    ],
+    ['429', () => new ThrottleError('busy', { retryAfter: 1 })],
+  ] as const)('redelivers the same message, never a handoff, when the admitting run_started fails with a %s', async (_label, error) => {
+    const { world, start, runStartedData } = await candidate(
+      'admit-on-run-started',
+      0,
+      { when: 'before-commit', error }
+    );
+
+    const outcome = await world.deliver(start).then(
+      (result) => ({ result }),
+      (thrown: unknown) => ({ thrown })
+    );
+
+    expect(outcome).not.toHaveProperty('result');
+    // Held for redelivery as the same message, reservation and all.
+    expect(world.held).toHaveLength(1);
+    expect(world.held[0].message).toBe(start.message);
+    expect(world.held[0].messageId).toBe(start.messageId);
+    expect(world.held[0].handoffCount ?? 0).toBe(0);
+    expect(
+      (world.held[0].message as { runInput?: { startHook?: unknown } }).runInput
+        ?.startHook
+    ).toEqual({ token: TOKEN });
+    expect(world.events).toEqual([]);
+    expect(bodies).toBe(0);
+
+    // The redelivery admits it, from the reservation the message still held.
+    await world.runUntilIdle();
+    expect(runStartedData.at(-1)).toMatchObject({
+      startHook: { token: TOKEN },
+    });
+    expect(world.events.map((e) => e.eventType)).toContain('run_completed');
   });
 
   describe.each(nonFirst)('on %s of an undecided candidate', (_label, as) => {

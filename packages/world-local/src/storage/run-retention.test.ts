@@ -191,6 +191,22 @@ describe('run retention (world-local)', () => {
         tokenRetentionUntil,
       });
       expect(await eventPayloads(run.runId)).toEqual([]);
+      // Nor on the creation events, which carry the start Hook too.
+      const { data: events } = await storage.events.list({
+        runId: run.runId,
+        pagination: {},
+      });
+      const startHooks = events.flatMap((event) => {
+        const startHook = (
+          event as { eventData?: { startHook?: Record<string, unknown> } }
+        ).eventData?.startHook;
+        return startHook ? [startHook] : [];
+      });
+      expect(startHooks.length).toBeGreaterThan(0);
+      for (const startHook of startHooks) {
+        expect(startHook).not.toHaveProperty('metadata');
+        expect(startHook.token).toBe(token);
+      }
       // The token is still held for its retention.
       const contender = await storage.events
         .create(`wrun_${ulid()}`, {

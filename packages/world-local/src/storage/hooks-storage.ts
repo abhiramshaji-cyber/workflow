@@ -30,6 +30,7 @@ import {
 } from '../fs.js';
 import { filterHookData } from './filters.js';
 import {
+  fenceStartHookCandidate,
   type HookTokenClaim,
   hookRecoveryMarkerPath,
   hookTokenClaimPath,
@@ -250,23 +251,39 @@ export function createHooksStorage(
     // owner, just no Hook. Retryable until the run adopts it; not found once
     // the run has ended without doing so.
     const throwIfReserved = async (reserved: HookTokenClaim) => {
-      const owner = await readJSONWithFallback(
-        basedir,
-        'runs',
-        reserved.runId,
-        RunRecordSchema,
-        tag
-      );
-      // Reserved while its run is live, or, before the run is written,
-      // while its admission may still be in flight (the orphan grace).
-      if (
-        owner
-          ? !isTerminalWorkflowRunStatus(owner.status)
-          : isWithinStartHookOrphanGrace(reserved)
-      ) {
-        throw new HookReservedError(token, reserved.runId, {
+      const readOwner = () =>
+        readJSONWithFallback(
+          basedir,
+          'runs',
+          reserved.runId,
+          RunRecordSchema,
+          tag
+        );
+      const reservedError = () =>
+        new HookReservedError(token, reserved.runId, {
           retryAfter: HOOK_RESERVED_RETRY_AFTER_SECONDS,
         });
+      let owner = await readOwner();
+      if (owner) {
+        if (!isTerminalWorkflowRunStatus(owner.status)) throw reservedError();
+        return;
+      }
+      // Before the run is written, its admission may still be in flight
+      // (the orphan grace).
+      if (isWithinStartHookOrphanGrace(reserved)) throw reservedError();
+      // Past the grace, fence the candidate before answering not found: its
+      // queued copy could otherwise still create the run, and the token
+      // would go from not found back to reserved.
+      if (
+        await fenceStartHookCandidate(basedir, reserved.runId, tag, { token })
+      ) {
+        return;
+      }
+      // The path holds a record after all: a fence, or the run, published
+      // since the read above.
+      owner = await readOwner();
+      if (owner && !isTerminalWorkflowRunStatus(owner.status)) {
+        throw reservedError();
       }
     };
     if (claim?.reservation && !claim.hookId) {

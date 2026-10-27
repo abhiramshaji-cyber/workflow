@@ -107,30 +107,58 @@ export const START_HOOK_ADMISSION_REJECTED_CODE =
   'START_HOOK_ADMISSION_REJECTED';
 
 /**
+ * `WorkflowWorldError.code` for a start Hook request answered while admission
+ * is switched off, with nothing recorded for the candidate, so another copy
+ * may still be admitted later. Mirrors `START_HOOK_ADMISSION_DISABLED` in
+ * `@workflow/errors`.
+ */
+export const START_HOOK_ADMISSION_DISABLED_CODE =
+  'START_HOOK_ADMISSION_DISABLED';
+
+/**
+ * `WorkflowWorldError.code` for a `run_cancelled` of a candidate that was
+ * admitted but never became a run: the World fenced it instead. Mirrors
+ * `START_HOOK_CANDIDATE_CANCELLED` in `@workflow/errors`.
+ */
+export const START_HOOK_CANDIDATE_CANCELLED_CODE =
+  'START_HOOK_CANDIDATE_CANCELLED';
+
+/**
  * Wire codes a remote World (workflow-server) answers a start Hook admission
  * with, in the JSON error body's `error` (or `code`) field:
  *
  * - `409 start-hook-conflict`: the candidate was refused. The body carries
  *   `token` and `conflictingRunId` at the top level. Maps to
  *   `HookConflictError(token, conflictingRunId)`.
- * - `400 start-hook-admission-rejected`: a permanent validation failure.
+ * - `400 start-hook-admission-rejected`: a permanent refusal, the same for
+ *   every copy of the candidate. Maps to `WorkflowWorldError` with code
+ *   {@link START_HOOK_ADMISSION_REJECTED_CODE}.
  * - `400 start-hook-disabled`: admission is switched off on the backend (kill
- *   switch). Never answered by silently ignoring `startHook`.
+ *   switch) and nothing was recorded for the candidate, so it is not final.
+ *   Maps to {@link START_HOOK_ADMISSION_DISABLED_CODE}. A backend that records
+ *   the refusal as the candidate's decision answers
+ *   `start-hook-admission-rejected` instead. Never answered by silently
+ *   ignoring `startHook`.
  *
- * Both 400 codes map to `WorkflowWorldError` with code
- * {@link START_HOOK_ADMISSION_REJECTED_CODE}. Contention the backend could
- * not settle answers a plain 429, which stays retryable.
+ * - `409 start-hook-candidate-cancelled`: a `run_cancelled` reached a
+ *   candidate that was admitted but has no run; the backend fenced it, so no
+ *   copy can create it. Maps to {@link START_HOOK_CANDIDATE_CANCELLED_CODE}.
  *
- * A by-token Hook lookup (or a `hook_received`) that lands on a reservation
- * its run has not adopted answers `425 hook-reserved` with `runId` at the top
- * level and a `Retry-After` header, writing nothing. Maps to
- * `HookReservedError(token, runId, { retryAfter })`.
+ * Contention the backend could not settle answers a plain 429, which stays
+ * retryable.
+ *
+ * A by-token Hook lookup that lands on a reservation its run has not adopted
+ * answers `425 hook-reserved` with `runId` at the top level and a
+ * `Retry-After` header, writing nothing. Maps to
+ * `HookReservedError(token, runId, { retryAfter })`. `resumeHook()` looks the
+ * token up before it writes `hook_received`, so that is where it surfaces.
  */
 export const START_HOOK_WIRE_CODES = {
   conflict: 'start-hook-conflict',
   admissionRejected: 'start-hook-admission-rejected',
   disabled: 'start-hook-disabled',
   reserved: 'hook-reserved',
+  candidateCancelled: 'start-hook-candidate-cancelled',
 } as const;
 
 /**

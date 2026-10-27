@@ -3,7 +3,9 @@ import {
   HookConflictError,
   HookNotFoundError,
   HookReservedError,
+  START_HOOK_ADMISSION_DISABLED,
   START_HOOK_ADMISSION_REJECTED,
+  START_HOOK_CANDIDATE_CANCELLED,
   ThrottleError,
   TooEarlyError,
   WorkflowWorldError,
@@ -190,9 +192,9 @@ describe('atomic start Hook wire contract (world-vercel)', () => {
   });
 
   it.each([
-    START_HOOK_WIRE_CODES.admissionRejected,
-    START_HOOK_WIRE_CODES.disabled,
-  ])('maps a 400 %s to a permanent START_HOOK_ADMISSION_REJECTED', (code) => {
+    [START_HOOK_WIRE_CODES.admissionRejected, START_HOOK_ADMISSION_REJECTED],
+    [START_HOOK_WIRE_CODES.disabled, START_HOOK_ADMISSION_DISABLED],
+  ])('maps a 400 %s to %s', (code, mapped) => {
     const thrown = thrownBy(() =>
       throwForErrorResponse(
         400,
@@ -203,9 +205,27 @@ describe('atomic start Hook wire contract (world-vercel)', () => {
       )
     );
     expect(WorkflowWorldError.is(thrown)).toBe(true);
+    expect(thrown).toMatchObject({ status: 400, code: mapped });
+  });
+
+  it('maps a 409 start-hook-candidate-cancelled to START_HOOK_CANDIDATE_CANCELLED, not EntityConflictError', () => {
+    const thrown = thrownBy(() =>
+      throwForErrorResponse(
+        409,
+        { 'content-type': 'application/json' },
+        json({
+          error: START_HOOK_WIRE_CODES.candidateCancelled,
+          message: 'cancelled before it was created',
+          runId: 'wrun_1',
+        }),
+        'createEvent',
+        'http://x'
+      )
+    );
+    expect(EntityConflictError.is(thrown)).toBe(false);
     expect(thrown).toMatchObject({
-      status: 400,
-      code: START_HOOK_ADMISSION_REJECTED,
+      status: 409,
+      code: START_HOOK_CANDIDATE_CANCELLED,
     });
   });
 

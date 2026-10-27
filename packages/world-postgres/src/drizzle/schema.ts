@@ -150,9 +150,10 @@ export const runs = schema.table(
      */
     dynamicWorkflowCode: Cbor<SerializedData>()('dynamic_workflow_code_cbor'),
     /**
-     * The Hook token this run reserved through `start({ hook })`, as admitted
-     * (see `workflow_start_hook_admissions`). Display and echo only: the
-     * admission row is what holds the token. Null on every other run.
+     * The Hook token this run reserved through `start({ hook })`, as admitted,
+     * without its metadata (which lives on the reservation's placeholder Hook
+     * row). Display and echo only: the placeholder row is what holds the
+     * token. Null on every other run.
      */
     startHook: Cbor<StartHook>()('start_hook_cbor'),
     createdAt: timestamptz('created_at').default(sql`now()`).notNull(),
@@ -253,16 +254,14 @@ export const eventSlots = schema.table('workflow_event_slots', {
  * `start-hook.ts` in @workflow/world, and `../start-hook.ts` here).
  *
  * - `accepted` rows are written in the same transaction as the run they
- *   admit, so an accepted candidate always has its run (until the run is
- *   deleted, which releases the token). `holder_run_id` is the run that holds
- *   the reservation: the candidate itself, until a forced `createHook` takes
- *   the materialized Hook, and the reservation with it, into another run.
+ *   admit and its reservation (a placeholder row in `workflow_hooks`).
  * - `rejected` rows record the owner the candidate lost to, so a later
  *   attempt for the same candidate answers the same `conflicting_run_id`
  *   even after the owner has released the token.
  *
- * A reservation holds its token while its holder run is not terminal, or
- * while `token_retention_until` is in the future.
+ * A decision only matters inside its candidate's 24h window: past it, every
+ * attempt for the candidate is refused regardless. Admissions delete rows
+ * older than that as they go (`created_at` index).
  */
 export const startHookAdmissions = schema.table(
   'workflow_start_hook_admissions',
@@ -270,20 +269,10 @@ export const startHookAdmissions = schema.table(
     runId: varchar('run_id').primaryKey(),
     token: varchar('token').notNull(),
     decision: varchar('decision').$type<'accepted' | 'rejected'>().notNull(),
-    holderRunId: varchar('holder_run_id'),
     conflictingRunId: varchar('conflicting_run_id'),
-    tokenRetentionUntil: timestamptz('token_retention_until'),
-    /** The start Hook's serialized metadata, for an adoption that has none. */
-    metadata: Cbor<SerializedData>()('metadata_cbor'),
-    /**
-     * When the holder's `createHook()` first adopted the reservation. Until
-     * then a by-token lookup answers `HookReservedError` rather than not
-     * found.
-     */
-    adoptedAt: timestamptz('adopted_at'),
     createdAt: timestamptz('created_at').default(sql`now()`).notNull(),
   },
-  (tb) => [index().on(tb.token)]
+  (tb) => [index().on(tb.createdAt)]
 );
 
 export const steps = schema.table(
@@ -356,10 +345,42 @@ export const hooks = schema.table(
     claimedFrom: Cbor<NonNullable<Hook['claimedFrom']>>()('claimed_from'),
     // `resumeCapabilities` is deliberately response-only (attested fresh on
     // each by-token lookup, never persisted), so it must not become a column.
+    /**
+     * This row's claim on `token` is unique: at most one row per token has
+     * it (`workflow_hooks_token_claim_unique`), so two writers racing for a
+     * token conflict on the insert. Set on every row this version writes
+     * except a Hook that adopts its run's start reservation, whose
+     * placeholder row holds the claim. Rows written before it existed have
+     * it false and keep the old read-then-insert check only.
+     */
+    claimsToken: boolean('claims_token').notNull().default(false),
+    /**
+     * A `start({ hook })` reservation's placeholder: no Hook, just the run
+     * holding the token (`run_id`), its retention and the start's metadata.
+     * Never returned as a Hook. Its `hook_id` is `shr_<candidate run id>`.
+     */
+    isStartReservation: boolean('is_start_reservation')
+      .notNull()
+      .default(false),
+    /**
+     * On a placeholder: when the holder's `createHook()` first adopted it.
+     * Until then a by-token lookup answers `HookReservedError`.
+     */
+    adoptedAt: timestamptz('adopted_at'),
   } satisfies DrizzlishOfType<
-    Cborized<Omit<Hook, 'resumeCapabilities'>, 'metadata'>
+    Cborized<Omit<Hook, 'resumeCapabilities'>, 'metadata'> & {
+      claimsToken?: boolean;
+      isStartReservation?: boolean;
+      adoptedAt?: Date;
+    }
   >,
-  (tb) => [index().on(tb.runId), index().on(tb.token)]
+  (tb) => [
+    index().on(tb.runId),
+    index().on(tb.token),
+    uniqueIndex('workflow_hooks_token_claim_unique')
+      .on(tb.token)
+      .where(sql`${tb.claimsToken}`),
+  ]
 );
 
 export const waits = schema.table(

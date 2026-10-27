@@ -201,7 +201,7 @@ describe('wire parity: guest serialize matches the reference codec', () => {
     ],
     [
       'HookReservedError',
-      '(() => { const e = new Error(\'Hook token "order:1" is reserved by workflow run "wrun_owner", which has not registered its hook yet; retry shortly\'); e.name = "HookReservedError"; e.stack = "reserved-stack"; e.token = "order:1"; e.runId = "wrun_owner"; e.retryAfter = 1; return e; })()',
+      '(() => { const e = new Error(\'Hook token is reserved by workflow run "wrun_owner", which has not registered its hook yet. It stays reserved until that run registers its hook or ends.\'); e.name = "HookReservedError"; e.stack = "reserved-stack"; e.token = "order:1"; e.runId = "wrun_owner"; e.retryAfter = 1; return e; })()',
       () => {
         const error = new HookReservedError('order:1', 'wrun_owner', {
           retryAfter: 1,
@@ -212,7 +212,7 @@ describe('wire parity: guest serialize matches the reference codec', () => {
     ],
     [
       'WorkflowStartError',
-      '(() => { const cause = new Error("gateway timed out"); cause.stack = "cause-stack"; const e = new Error(\'Could not confirm whether workflow run "wrun_c" was admitted: gateway timed out\', { cause }); e.name = "WorkflowStartError"; e.stack = "start-stack"; e.runId = "wrun_c"; e.stage = "admission"; return e; })()',
+      '(() => { const cause = new Error("gateway timed out"); cause.stack = "cause-stack"; const e = new Error(\'Could not confirm whether workflow run "wrun_c" was admitted: gateway timed out. Retrying with the same hook token is safe: it never admits a second run.\', { cause }); e.name = "WorkflowStartError"; e.stack = "start-stack"; e.runId = "wrun_c"; e.stage = "admission"; return e; })()',
       () => {
         const cause = new Error('gateway timed out');
         cause.stack = 'cause-stack';

@@ -11,6 +11,7 @@ import {
   PreconditionFailedError,
   RUN_ERROR_CODES,
   RunExpiredError,
+  START_HOOK_ADMISSION_DISABLED,
   START_HOOK_ADMISSION_REJECTED,
   WorkflowWorldError,
 } from '@workflow/errors';
@@ -184,7 +185,7 @@ describe('queued copy of a start Hook candidate', () => {
     const { response, created } = await deliver({
       startHook,
       runStarted: async () => {
-        throw new WorkflowWorldError('disabled', {
+        throw new WorkflowWorldError('too old', {
           status: 400,
           code: START_HOOK_ADMISSION_REJECTED,
         });
@@ -198,6 +199,24 @@ describe('queued copy of a start Hook candidate', () => {
       expect.stringMatching(/permanently rejected/),
       expect.anything()
     );
+  });
+
+  it('redelivers a kill-switch answer, which recorded nothing for the candidate', async () => {
+    const sink: any[] = [];
+    const outcome = await deliver({
+      startHook,
+      sink,
+      runStarted: async () => {
+        throw new WorkflowWorldError('disabled', {
+          status: 400,
+          code: START_HOOK_ADMISSION_DISABLED,
+        });
+      },
+    }).catch((e: unknown) => e);
+
+    // Neither acknowledged as a refusal nor a failed run: the queue retries.
+    expect(outcome).toMatchObject({ code: START_HOOK_ADMISSION_DISABLED });
+    expect(sink.map((e) => e.eventType)).toEqual(['run_started']);
   });
 
   it.each([

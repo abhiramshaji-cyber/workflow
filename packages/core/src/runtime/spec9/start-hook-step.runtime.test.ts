@@ -159,12 +159,12 @@ describe.each([
   });
 
   it('retries an uncertain start, ending with exactly one owner', async () => {
-    // Attempt 1: admitted, but the response is lost. Attempt 2: a new
-    // candidate, refused in favor of the first.
+    // Step attempt 1: admitted, but every confirmation of it is lost too.
+    // Step attempt 2: a new candidate, refused in favor of the first.
     let first: string | undefined;
     childWorld.answer = async (attempt, runId) => {
-      if (attempt === 1) {
-        first = runId;
+      first ??= runId;
+      if (runId === first) {
         throw new WorkflowWorldError('gateway timeout', { status: 504 });
       }
       throw new HookConflictError(TOKEN, first);
@@ -180,7 +180,7 @@ describe.each([
     expect(childWorld.admitted).toEqual([]);
   });
 
-  it('retries an uncertain start into an admission', async () => {
+  it('confirms an uncertain start in place, without a step retry', async () => {
     childWorld.answer = async (attempt) => {
       if (attempt === 1) {
         throw new WorkflowWorldError('gateway timeout', { status: 504 });
@@ -189,7 +189,7 @@ describe.each([
 
     const { output, count } = await runParent();
 
-    expect(count('step_retrying')).toBe(1);
+    expect(count('step_retrying')).toBe(0);
     expect(output).toEqual({ started: childWorld.admitted[0] });
     expect(childWorld.admitted).toHaveLength(1);
   });

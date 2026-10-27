@@ -490,17 +490,21 @@ export const HOOK_TOKEN_CLAIM_LOCK_STALE_MS = 30_000;
 export const START_HOOK_ORPHAN_GRACE_MS = 2 * HOOK_TOKEN_CLAIM_LOCK_STALE_MS;
 
 /**
- * What a contender writes on a run-less reservation's run record path before
- * releasing it: the stalled writer's exclusive publication of that run then
- * fails, so the orphan can never become a run once its token moved on. The
- * fence names the run the token went to, which every later attempt for the
- * orphan answers as its owner.
+ * What is written on a run-less reservation's run record path once its orphan
+ * grace has passed, before anything treats the token as free: the stalled
+ * writer's exclusive publication of that run then fails, so the orphan can
+ * never become a run. A contender's fence names the run the token went to,
+ * which every later attempt for the orphan answers as its owner. A lookup's
+ * fence (written before answering not found) and a cancellation's (a
+ * `run_cancelled` for a run that was never created) name none, and later
+ * attempts are refused permanently.
  */
 export const StartHookFenceSchema = z.compile(
   z.object({
     startHookFence: z.object({
-      token: z.string(),
-      conflictingRunId: z.string(),
+      /** Absent on a cancellation's fence, which knows only the run id. */
+      token: z.string().optional(),
+      conflictingRunId: z.string().optional(),
     }),
   })
 );

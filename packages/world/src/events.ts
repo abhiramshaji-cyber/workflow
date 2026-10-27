@@ -491,10 +491,14 @@ const HookConflictEventSchema = BaseEventSchema.extend({
      * `SPEC_VERSION_SUPPORTS_HOOK_FORCE_CLAIM`, so its runtime would not
      * understand the involuntary disposal — the forced hook gets the
      * ordinary `HookConflictError` it opted out of instead of stranding
-     * that run. Absent on a conflict answered by a World that does not
-     * implement forcing at all.
+     * that run. `start-reservation`: the token is a `start({ hook })`
+     * reservation its run has not adopted yet, which cannot be force-claimed
+     * (there is no Hook to take over). Absent on a conflict answered by a
+     * World that does not implement forcing at all.
      */
-    forceRefusedReason: z.literal('victim-spec-version').optional(),
+    forceRefusedReason: z
+      .enum(['victim-spec-version', 'start-reservation'])
+      .optional(),
   }),
 });
 

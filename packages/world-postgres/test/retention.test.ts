@@ -233,7 +233,7 @@ describe('Retention ($retention: 0)', () => {
     it.each([
       ['unadopted', false],
       ['adopted', true],
-    ])("drops an %s start Hook's metadata from the run and its admission, keeping the token", async (_label, adopt) => {
+    ])("drops an %s start Hook's metadata from the run and its reservation, keeping the token", async (_label, adopt) => {
       const runId = `wrun_${ulid()}`;
       const token = `start-${ulid()}`;
       const tokenRetentionUntil = new Date(Date.now() + 60 * 60 * 1000);
@@ -272,18 +272,30 @@ describe('Retention ($retention: 0)', () => {
         tokenRetentionUntil.getTime()
       );
       const { rows } = await pool.query(
-        `SELECT metadata_cbor, token, decision, token_retention_until
-           FROM workflow.workflow_start_hook_admissions WHERE run_id = $1`,
-        [runId]
+        `SELECT metadata_cbor, token_retention_until
+           FROM workflow.workflow_hooks
+          WHERE token = $1 AND is_start_reservation`,
+        [token]
       );
-      expect(rows[0]).toMatchObject({
-        metadata_cbor: null,
-        token,
-        decision: 'accepted',
-      });
+      expect(rows).toHaveLength(1);
+      expect(rows[0].metadata_cbor).toBeNull();
       expect(rows[0].token_retention_until.getTime()).toBe(
         tokenRetentionUntil.getTime()
       );
+      // The reservation still holds the token for its retention.
+      const contender = `wrun_${ulid()}`;
+      const refused = await events
+        .create(contender, {
+          eventType: 'run_created',
+          eventData: {
+            deploymentId: 'deployment-1',
+            workflowName: 'retention-workflow',
+            input: new Uint8Array([1]),
+            startHook: { token },
+          },
+        } as never)
+        .catch((e: unknown) => e);
+      expect(refused).toMatchObject({ conflictingRunId: runId });
       expect(await countRemainingPayloads(runId)).toBe(0);
     });
 

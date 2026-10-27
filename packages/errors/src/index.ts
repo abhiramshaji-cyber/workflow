@@ -230,10 +230,29 @@ export class WorkflowWorldError extends WorkflowError {
 /**
  * `WorkflowWorldError.code` for a `start({ hook })` request the World will
  * never admit: an invalid start Hook, a retention beyond the World's limit, a
- * candidate too old to be created, or admission switched off on the backend.
- * Permanent, so the queued copy of the candidate stops retrying on it.
+ * candidate too old to be created, or a candidate refused while admission was
+ * switched off and recorded as refused. Permanent, so the queued copy of the
+ * candidate stops retrying on it.
  */
 export const START_HOOK_ADMISSION_REJECTED = 'START_HOOK_ADMISSION_REJECTED';
+
+/**
+ * `WorkflowWorldError.code` for a `start({ hook })` request answered while
+ * admission is switched off on the backend, with no decision recorded for the
+ * candidate. Not final: once admission is back on, another copy of the same
+ * candidate can still be admitted. `start()` reports it as
+ * `WorkflowStartError`, and the candidate's queued copy is redelivered rather
+ * than acknowledged.
+ */
+export const START_HOOK_ADMISSION_DISABLED = 'START_HOOK_ADMISSION_DISABLED';
+
+/**
+ * `WorkflowWorldError.code` for a `run_cancelled` that reached a
+ * `start({ hook })` candidate the World admitted but never created a run for.
+ * The World fenced it, so no copy can create it any more, and released its
+ * token as for an ended run. `cancel()` treats it as cancelled.
+ */
+export const START_HOOK_CANDIDATE_CANCELLED = 'START_HOOK_CANDIDATE_CANCELLED';
 
 /** Which half of `start({ hook })` could not be confirmed. */
 export type WorkflowStartStage = 'queue' | 'admission';
@@ -267,7 +286,7 @@ export class WorkflowStartError extends WorkflowError {
     super(
       `Could not confirm whether workflow run "${runId}" was ${
         stage === 'queue' ? 'queued' : 'admitted'
-      }: ${causeMessage}`,
+      }: ${causeMessage}. Retrying with the same hook token is safe: it never admits a second run.`,
       { cause }
     );
     this.name = 'WorkflowStartError';
@@ -912,7 +931,9 @@ export class HookNotFoundError extends WorkflowError {
  * lookup resolves once the owner's Hook is registered. If the owner ends
  * without registering one, the lookup answers `HookNotFoundError` instead.
  *
- * Retryable: inside a step, the step's ordinary retries cover it.
+ * Retryable. Inside a step, `resumeHook()` and `getHookByToken()` wait for
+ * the owner for up to 30 seconds (honoring `retryAfter`) before throwing it,
+ * and the step's retries cover a longer wait.
  *
  * @example
  * ```ts
@@ -937,7 +958,7 @@ export class HookReservedError extends WorkflowError {
 
   constructor(token: string, runId: string, options?: { retryAfter?: number }) {
     super(
-      `Hook token "${token}" is reserved by workflow run "${runId}", which has not registered its hook yet; retry shortly`,
+      `Hook token is reserved by workflow run "${runId}", which has not registered its hook yet. It stays reserved until that run registers its hook or ends.`,
       {}
     );
     this.name = 'HookReservedError';

@@ -32,7 +32,7 @@ async function resumeWhenLive() {
 }
 ```
 
-If the owner ends without registering the hook, or after registering and disposing it, the lookup answers `HookNotFoundError`. Inside a workflow step, the step's ordinary retries cover `HookReservedError`.
+If the owner ends without registering the hook, or after registering and disposing it, the lookup answers `HookNotFoundError`. Inside a step, `resumeHook()` and `getHookByToken()` wait for the owner for up to 30 seconds, honoring `retryAfter`, before throwing `HookReservedError`; the step's retries cover a longer wait.
 
 ## API Signature
 

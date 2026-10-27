@@ -10,6 +10,7 @@ import type { Storage, WorldCapabilities } from '../interfaces.js';
 import { SPEC_VERSION_CURRENT } from '../spec-version.js';
 import {
   START_HOOK_ADMISSION_REJECTED_CODE,
+  START_HOOK_CANDIDATE_CANCELLED_CODE,
   START_HOOK_CANDIDATE_MAX_AGE_MS,
   type StartHook,
 } from '../start-hook.js';
@@ -41,7 +42,8 @@ import {
  *   owner, and answers not found once the owner ended without adopting, or
  *   after the adopted Hook was disposed.
  * - An adoption without metadata takes the reservation's; its own wins.
- * - A forced `createHook()` cannot take a reservation that has no Hook, and
+ * - A forced `createHook()` cannot take a reservation that has no Hook
+ *   (answered `forceRefusedReason: 'start-reservation'`), and
  *   taking its adopted Hook moves the reservation to the claimer, extended
  *   by the claimer's Hook retention past that Hook's disposal.
  * - A retention beyond the World's limit is refused with
@@ -355,6 +357,134 @@ export function atomicStartHookConformance(
       }
     });
 
+    test("another run's concurrent createHook and an admission leave one owner", async () => {
+      const first = setup();
+      const second = options.secondEvents?.(first) ?? first;
+      for (let round = 0; round < 4; round++) {
+        const token = newToken();
+        const other = await plainRun(first);
+        const candidate = options.newRunId();
+        const [admission, created] = await Promise.allSettled([
+          create(
+            round % 2 === 0 ? first : second,
+            candidate,
+            runCreated({ token })
+          ),
+          create(first, other, hookCreated(token, newHookId())),
+        ]);
+        expect(created.status).toBe('fulfilled');
+        const hookWon =
+          created.status === 'fulfilled' &&
+          created.value.event?.eventType === 'hook_created';
+        if (hookWon) {
+          // The Hook owns the token: the candidate was refused naming it.
+          expect(admission.status).toBe('rejected');
+          if (admission.status === 'rejected') {
+            expect(errorNamed(admission.reason, 'HookConflictError')).toBe(
+              true
+            );
+            expect(admission.reason).toMatchObject({ conflictingRunId: other });
+          }
+          expect(await runExists(candidate)).toBe(false);
+        } else {
+          // The reservation owns it: the Hook creation conflicted with it.
+          expect(admission.status).toBe('fulfilled');
+          expect(
+            created.status === 'fulfilled' && created.value.event?.eventData
+          ).toMatchObject({ conflictingRunId: candidate });
+        }
+      }
+    });
+
+    test("an adoption racing a disposal of the owner's earlier Hook keeps the token the owner's", async () => {
+      const first = setup();
+      const second = options.secondEvents?.(first) ?? first;
+      for (let round = 0; round < 4; round++) {
+        const token = newToken();
+        const owner = await admit(first, { token });
+        await create(first, owner, runStarted({ token }));
+        const earlier = newHookId();
+        await create(first, owner, hookCreated(token, earlier));
+
+        await Promise.allSettled([
+          create(first, owner, hookDisposed(token, earlier)),
+          create(
+            round % 2 === 0 ? second : first,
+            owner,
+            hookCreated(token, newHookId())
+          ),
+        ]);
+
+        // However the two interleaved, the reservation is the owner's.
+        await expectRefused(admit(first, { token }), token, owner);
+        const other = await plainRun(first);
+        const conflict = await create(
+          first,
+          other,
+          hookCreated(token, newHookId())
+        );
+        expect(conflict.event?.eventType).toBe('hook_conflict');
+        expect(conflict.event?.eventData).toMatchObject({
+          conflictingRunId: owner,
+        });
+      }
+    });
+
+    test("an admission racing the owner's end leaves exactly one owner", async () => {
+      const first = setup();
+      const second = options.secondEvents?.(first) ?? first;
+      for (let round = 0; round < 4; round++) {
+        const token = newToken();
+        const owner = await admit(first, { token });
+        await create(first, owner, runStarted({ token }));
+        const candidate = options.newRunId();
+
+        const [, admission] = await Promise.allSettled([
+          finish(first, owner),
+          create(
+            round % 2 === 0 ? second : first,
+            candidate,
+            runCreated({ token })
+          ),
+        ]);
+
+        if (admission.status === 'rejected') {
+          // Decided while the owner still ran: refused naming it, and the
+          // token is free now that it has ended.
+          expect(errorNamed(admission.reason, 'HookConflictError')).toBe(true);
+          expect(admission.reason).toMatchObject({ conflictingRunId: owner });
+          expect(await runExists(candidate)).toBe(false);
+          await admit(first, { token });
+        } else {
+          // Decided after the end: the candidate owns the token.
+          await expectRefused(admit(first, { token }), token, candidate);
+        }
+      }
+    });
+
+    test('an admission racing the end of an owner with retention is refused', async () => {
+      const first = setup();
+      const second = options.secondEvents?.(first) ?? first;
+      const token = newToken();
+      const owner = await admit(first, {
+        token,
+        tokenRetentionUntil: new Date(Date.now() + 60_000),
+      });
+      await create(first, owner, runStarted({ token }));
+      const candidate = options.newRunId();
+
+      const [, admission] = await Promise.allSettled([
+        finish(first, owner),
+        create(second, candidate, runCreated({ token })),
+      ]);
+
+      expect(admission.status).toBe('rejected');
+      if (admission.status === 'rejected') {
+        expect(admission.reason).toMatchObject({ conflictingRunId: owner });
+      }
+      expect(await runExists(candidate)).toBe(false);
+    });
+
     test('the direct and queued writes of one candidate create one run', async () => {
       const first = setup();
       const second = options.secondEvents?.(first) ?? first;
@@ -563,7 +693,7 @@ export function atomicStartHookConformance(
       expect(hook?.metadata).toEqual(own);
     });
 
-    test('a forced createHook cannot take a reservation with no Hook', async () => {
+    test('a forced createHook cannot take a reservation with no Hook, and is told why', async () => {
       if (!options.capabilities()?.hookForceClaim) return;
       const events = setup();
       const token = newToken();
@@ -577,8 +707,10 @@ export function atomicStartHookConformance(
         hookCreated(token, newHookId(), true)
       );
       expect(result.event?.eventType).toBe('hook_conflict');
+      // The reason makes it an ordinary conflict, not "cannot force-claim".
       expect(result.event?.eventData).toMatchObject({
         conflictingRunId: owner,
+        forceRefusedReason: 'start-reservation',
       });
     });
 
@@ -720,6 +852,60 @@ export function atomicStartHookConformance(
               code: START_HOOK_ADMISSION_REJECTED_CODE,
             });
           }
+          expect(await runExists(orphan)).toBe(false);
+        }
+      );
+
+      stagedOrphanTest(
+        'a lookup of an orphan is reserved during its hold, and stays not found once it answers so',
+        async () => {
+          const events = setup();
+          const token = newToken();
+          const orphan = options.newRunId();
+          const holdMs = options.orphanHoldMs ?? DAY_MS;
+          await options.stageOrphan?.(orphan, token);
+
+          advance?.(holdMs - 5_000);
+          const reserved = await lookup(token);
+          expect(errorNamed(reserved.error, 'HookReservedError')).toBe(true);
+          expect(reserved.error).toMatchObject({ runId: orphan });
+
+          advance?.(10_000);
+          expect(
+            errorNamed((await lookup(token)).error, 'HookNotFoundError')
+          ).toBe(true);
+          // The orphan's late copy can no longer make the token live.
+          await refusal(create(events, orphan, runStarted({ token })));
+          expect(await runExists(orphan)).toBe(false);
+          expect(
+            errorNamed((await lookup(token)).error, 'HookNotFoundError')
+          ).toBe(true);
+        }
+      );
+
+      stagedOrphanTest(
+        'cancelling a candidate that never became a run keeps it from ever becoming one',
+        async () => {
+          const events = setup();
+          const token = newToken();
+          const orphan = options.newRunId();
+          await options.stageOrphan?.(orphan, token);
+
+          const cancelled = await refusal(
+            create(events, orphan, {
+              eventType: 'run_cancelled',
+              specVersion: SPEC,
+            } as AnyEventRequest)
+          );
+          // Fenced as admitted-but-uncreated, or not found where the World
+          // records no decision for it; either way it can never be created.
+          expect(
+            (cancelled as { code?: unknown }).code ===
+              START_HOOK_CANDIDATE_CANCELLED_CODE ||
+              errorNamed(cancelled, 'WorkflowRunNotFoundError')
+          ).toBe(true);
+          await refusal(create(events, orphan, runStarted({ token })));
+          await refusal(create(events, orphan, runCreated({ token })));
           expect(await runExists(orphan)).toBe(false);
         }
       );

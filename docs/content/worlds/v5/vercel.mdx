@@ -382,7 +382,7 @@ Custom workflow-server URL for direct runtime requests, or for the proxy to forw
 
 ### `WORKFLOW_VERCEL_EXPERIMENTAL_START_HOOK`
 
-Set to `1` (or `true`) to enable [`start({ hook })`](/docs/api-reference/workflow-api/start#prevent-duplicate-starts) on the Vercel World. Off by default while the backend support rolls out; without it, `start({ hook })` throws before it enqueues anything. Set it on the deployment that starts runs and on any deployment those runs target.
+Set to `1` (or `true`) to enable [`start({ hook })`](/docs/api-reference/workflow-api/start#prevent-duplicate-starts) on the Vercel World. Off by default while the backend support rolls out; without it, `start({ hook })` throws before it enqueues anything. Set it on the deployment that starts runs and on any deployment those runs target. Turn it on only once the backend supports start Hooks everywhere, and off again before any backend rollback past that support: a backend without it ignores `startHook` and creates the run with no reservation.
 
 ### `WORKFLOW_SEQUENTIAL_REPLAYS`
 

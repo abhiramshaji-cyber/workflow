@@ -432,6 +432,11 @@ async function admitStartHook({
     // stalled past the orphan grace, so it can never be admitted.
     const fence = await readStartHookFence(basedir, runId, tag);
     if (fence) {
+      if (fence.conflictingRunId === undefined) {
+        throw startHookRejected(
+          `Workflow run "${runId}" was fenced as an orphan and can never be created`
+        );
+      }
       throw new HookConflictError(startHook.token, fence.conflictingRunId);
     }
     const run = await readJSONWithFallback(
@@ -1687,6 +1692,41 @@ export function createEventsStorage(
         // terminal state) return without publishing, and the position stays
         // available to the next writer.
         eventId = await mintEventId(effectiveRunId);
+
+        // Cancelling a run that was never created: it may be a
+        // `start({ hook })` candidate whose writer died before its run, whose
+        // queued copy could still create it. Fence its run record path so no
+        // copy ever can, then answer not found like any missing run. Only an
+        // id young enough to still be created is fenced: an older one (or a
+        // malformed one) can never become a run, and leaves nothing behind.
+        const cancelledCandidateTime =
+          !currentRun && data.eventType === 'run_cancelled'
+            ? ulidToDate(effectiveRunId.replace(/^wrun_/, ''))
+            : undefined;
+        if (!currentRun && data.eventType === 'run_cancelled') {
+          if (
+            cancelledCandidateTime &&
+            Date.now() - cancelledCandidateTime.getTime() <=
+              START_HOOK_CANDIDATE_MAX_AGE_MS &&
+            !(await fenceStartHookCandidate(basedir, effectiveRunId, tag, {}))
+          ) {
+            const raced = await readJSONWithFallback(
+              basedir,
+              'runs',
+              effectiveRunId,
+              RunRecordSchema,
+              tag
+            );
+            if (raced) {
+              // Created since the read above: the retry cancels it.
+              throw new WorkflowWorldError(
+                `Workflow run "${effectiveRunId}" was created while being cancelled; retry`,
+                { status: 503 }
+              );
+            }
+          }
+          throw new WorkflowRunNotFoundError(effectiveRunId);
+        }
 
         // These events are rejected on a non-existent run to match the
         // postgres and vercel worlds, which both surface this as a
@@ -3025,7 +3065,16 @@ export function createEventsStorage(
                 ))
               ) {
                 if (hookData.force !== true || !existingClaim.hookId) {
-                  return { status: 'conflict' as const, claim: existingClaim };
+                  return {
+                    status: 'conflict' as const,
+                    claim: existingClaim,
+                    // A start reservation with no Hook yet: nothing to take
+                    // over, so a forced creation gets the ordinary conflict.
+                    ...(hookData.force === true &&
+                      existingClaim.reservation && {
+                        forceRefusedReason: 'start-reservation' as const,
+                      }),
+                  };
                 }
                 if (
                   existingClaim.runId !== lockedVictim?.runId ||

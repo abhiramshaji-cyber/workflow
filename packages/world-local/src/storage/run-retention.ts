@@ -124,6 +124,12 @@ export async function purgeRunEntityData(
         ) {
           delete (eventData as Record<string, unknown>).dynamicWorkflowCode;
           delete (eventData as Record<string, unknown>).dynamicWorkflowCodeRef;
+          // A start Hook's metadata is user data; its token and retention
+          // are not.
+          const startHook = (eventData as { startHook?: unknown }).startHook;
+          if (startHook && typeof startHook === 'object') {
+            delete (startHook as Record<string, unknown>).metadata;
+          }
         }
       }
     ),
