@@ -143,6 +143,7 @@ import { runIdCreatedAt } from '../run-id-time.js';
 import {
   ackRefusedStartHookCandidate,
   admitsTurboStart,
+  recordAcceptedStartHookCandidate,
 } from '../start-hook-delivery.js';
 import { computeStepLatencyTracking } from '../step-latency.js';
 import { useQuickJSVm } from '../vm-mode.js';
@@ -1282,7 +1283,7 @@ async function runDelivery(
       if (turboStartFailure) {
         // Defensive: turbo is off for start Hook candidates, so a
         // backgrounded `run_started` never decides one.
-        if (ackRefusedStartHookCandidate(err, runInput, runId)) {
+        if (ackRefusedStartHookCandidate(err, runInput, runId, span)) {
           return undefined;
         }
         if (EntityConflictError.is(err) || RunExpiredError.is(err)) {
@@ -1563,6 +1564,7 @@ async function runDelivery(
           const started = await createEvent(runStartedRequest(), {
             requestId,
           });
+          recordAcceptedStartHookCandidate(runInput, span);
           run = started.run ?? run;
           maxEventsLimit = clampMaxEvents(started.maxEvents);
           runStartedReceivedAtMs = Date.now();
@@ -1573,7 +1575,7 @@ async function runDelivery(
           // A refused `start({ hook })` candidate: nothing ran and
           // it never becomes a run. Narrowed to the two admission
           // answers; every other error keeps its handling below.
-          if (ackRefusedStartHookCandidate(err, runInput, runId)) {
+          if (ackRefusedStartHookCandidate(err, runInput, runId, span)) {
             return undefined;
           }
           if (EntityConflictError.is(err) || RunExpiredError.is(err)) {

@@ -129,6 +129,7 @@ import { runIdCreatedAt } from '../run-id-time.js';
 import {
   ackRefusedStartHookCandidate,
   admitsTurboStart,
+  recordAcceptedStartHookCandidate,
 } from '../start-hook-delivery.js';
 import { computeStepLatencyTracking } from '../step-latency.js';
 import { useQuickJSVm } from '../vm-mode.js';
@@ -1733,6 +1734,7 @@ export async function runSpec8Delivery(
           throw setupError;
         }
         const result = await replayLoad;
+        recordAcceptedStartHookCandidate(runInput, span);
         // A single-orchestrator run reached here on a wrong routing
         // hint: hand the message to its orchestrator.
         if (
@@ -1791,7 +1793,7 @@ export async function runSpec8Delivery(
       } catch (err) {
         // A refused `start({ hook })` candidate's queued copy: nothing
         // ran, ack. Narrowed to the two admission answers.
-        if (ackRefusedStartHookCandidate(err, runInput, runId)) {
+        if (ackRefusedStartHookCandidate(err, runInput, runId, span)) {
           return;
         }
         // Run was concurrently completed/failed/canceled
