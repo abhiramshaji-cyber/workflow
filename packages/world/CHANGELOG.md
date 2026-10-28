@@ -1,5 +1,13 @@
 # @workflow/world
 
+## 5.0.6
+
+### Patch Changes
+
+- [#5070](https://github.com/vercel/workflow/pull/5070) [`b9d618a`](https://github.com/vercel/workflow/commit/b9d618ac722fc4ee9000166e521a06a6294ebffd) Thanks [@alangenfeld](https://github.com/alangenfeld)! - Forward the run's `encryptionPublicKey` on a resilient `run_started`, so a run created from its queued copy can still receive sealed writes.
+
+- [#4945](https://github.com/vercel/workflow/pull/4945) [`7e221fc`](https://github.com/vercel/workflow/commit/7e221fc9276b51f3cf7c597a5acdb781333b52dc) Thanks [@TooTallNate](https://github.com/TooTallNate)! - Bump `SNAPSHOT_FORMAT_VERSION` to 4 for the QuickJS engine's new pending-operation heap layout.
+
 ## 5.0.5
 
 ### Patch Changes

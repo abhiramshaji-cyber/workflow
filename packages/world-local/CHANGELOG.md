@@ -1,5 +1,18 @@
 # @workflow/world-local
 
+## 5.1.3
+
+### Patch Changes
+
+- [#5000](https://github.com/vercel/workflow/pull/5000) [`3ca3bf0`](https://github.com/vercel/workflow/commit/3ca3bf0b36b1bcdf1d105b8af530b6f0e553485b) Thanks [@Mark-Lasfar](https://github.com/Mark-Lasfar)! - Take over a run's in-band fence lock at once when its holder is known to be dead (its pid is gone on this host), instead of stalling in-band writes on that run for 30 s after the holder was killed
+
+- [#4940](https://github.com/vercel/workflow/pull/4940) [`6455beb`](https://github.com/vercel/workflow/commit/6455bebd7dbc18e08fce5e3dede6df6ac4d7d7ff) Thanks [@AndrewBarba](https://github.com/AndrewBarba)! - Restart recovery now dispatches steps that were running inline when the previous process exited right away instead of after the 860s inline-ownership lease, and `releaseOrphanedSteps(runId)` exposes the same release to embedders that recover runs themselves.
+
+- [#5069](https://github.com/vercel/workflow/pull/5069) [`72131a2`](https://github.com/vercel/workflow/commit/72131a227d3efbf2613104026976c3a0d887d1c6) Thanks [@AndrewBarba](https://github.com/AndrewBarba)! - Deliver stream chunks in the order they were written. A reader that opened, or polled, while chunks were being written could get a later chunk before an earlier one, and could get a chunk twice. Writes to one stream now land in order, including a `writeMulti` group and concurrent writes, and the reader holds live chunks while it reads from disk.
+- Updated dependencies [[`b9d618a`](https://github.com/vercel/workflow/commit/b9d618ac722fc4ee9000166e521a06a6294ebffd), [`cc637c4`](https://github.com/vercel/workflow/commit/cc637c42ac80cbf79780a1190e46dc0f01850d4c), [`7e221fc`](https://github.com/vercel/workflow/commit/7e221fc9276b51f3cf7c597a5acdb781333b52dc)]:
+  - @workflow/world@5.0.6
+  - @workflow/errors@5.0.6
+
 ## 5.1.2
 
 ### Patch Changes

@@ -1,5 +1,18 @@
 # @workflow/world-vercel
 
+## 5.3.0
+
+### Patch Changes
+
+- [#5072](https://github.com/vercel/workflow/pull/5072) [`612c5f4`](https://github.com/vercel/workflow/commit/612c5f4d558e61ea8c55dd269f2511b7bca69636) Thanks [@alangenfeld](https://github.com/alangenfeld)! - Name the fields a v4 `createEvent` response failed its schema on in the error message.
+
+- [#5043](https://github.com/vercel/workflow/pull/5043) [`1123ea6`](https://github.com/vercel/workflow/commit/1123ea6c13cce041b5088da2684987dfa5165a92) Thanks [@pranaygp](https://github.com/pranaygp)! - Upgrade `@vercel/queue` to 0.10.0 and publish a fan-out's batched step dispatches through the now-stable `sendBatch` instead of the deprecated `experimental_sendBatch`
+
+- [#4994](https://github.com/vercel/workflow/pull/4994) [`5dc9e15`](https://github.com/vercel/workflow/commit/5dc9e1543dfcbb1d130b9a4cff87b8952c4cd7c2) Thanks [@neilverc](https://github.com/neilverc)! - Stop following HTTP redirects on workflow API requests. `fetch` strips `Authorization` across origins but forwards every other header, so a redirect carried the request's `x-vercel-trusted-oidc-idp-token` to the host named in `Location`. A 3xx now surfaces as an error, matching the node:http transport.
+- Updated dependencies [[`b9d618a`](https://github.com/vercel/workflow/commit/b9d618ac722fc4ee9000166e521a06a6294ebffd), [`cc637c4`](https://github.com/vercel/workflow/commit/cc637c42ac80cbf79780a1190e46dc0f01850d4c), [`7e221fc`](https://github.com/vercel/workflow/commit/7e221fc9276b51f3cf7c597a5acdb781333b52dc)]:
+  - @workflow/world@5.0.6
+  - @workflow/errors@5.0.6
+
 ## 5.2.3
 
 ### Patch Changes

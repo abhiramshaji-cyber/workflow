@@ -1,5 +1,13 @@
 # @workflow/errors
 
+## 5.0.6
+
+### Patch Changes
+
+- [#5115](https://github.com/vercel/workflow/pull/5115) [`cc637c4`](https://github.com/vercel/workflow/commit/cc637c42ac80cbf79780a1190e46dc0f01850d4c) Thanks [@VaguelySerious](https://github.com/VaguelySerious)! - Retry steps whose stream encryption key lookup fails transiently instead of failing them with a `SerializationError`
+- Updated dependencies [[`b9d618a`](https://github.com/vercel/workflow/commit/b9d618ac722fc4ee9000166e521a06a6294ebffd), [`7e221fc`](https://github.com/vercel/workflow/commit/7e221fc9276b51f3cf7c597a5acdb781333b52dc)]:
+  - @workflow/world@5.0.6
+
 ## 5.0.5
 
 ### Patch Changes

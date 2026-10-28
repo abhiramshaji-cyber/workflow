@@ -1,5 +1,19 @@
 # @workflow/world-postgres
 
+## 5.1.0
+
+### Minor Changes
+
+- [#4759](https://github.com/vercel/workflow/pull/4759) [`c07a6a3`](https://github.com/vercel/workflow/commit/c07a6a395fef897602f9d99cf5aff46affd1ae7a) Thanks [@pranaygp](https://github.com/pranaygp)! - Add `jobLockStaleSeconds` (`WORKFLOW_POSTGRES_JOB_LOCK_STALE_SECONDS`, default `0`, off). When set, a running delivery renews its Graphile job lock, and a job whose process died is redelivered by another process once its lock has gone unrenewed for that many seconds, instead of after Graphile Worker's fixed 4 hours or the next restart. `30` is a good value when more than one process shares the database. It's off by default because of rolling upgrades: processes on an earlier version don't renew their locks, so turn it on once every process that shares the database runs this version.
+
+### Patch Changes
+
+- [#5053](https://github.com/vercel/workflow/pull/5053) [`af8c6d3`](https://github.com/vercel/workflow/commit/af8c6d3295ebc9aa7c0168cd0ca5007f62e6b9ba) Thanks [@NishitaSikka](https://github.com/NishitaSikka)! - Every keyed job now keeps its first scheduled delivery time (`preserve_run_at`), so an immediate duplicate cannot erase a delayed retry's backoff.
+- Updated dependencies [[`3ca3bf0`](https://github.com/vercel/workflow/commit/3ca3bf0b36b1bcdf1d105b8af530b6f0e553485b), [`b9d618a`](https://github.com/vercel/workflow/commit/b9d618ac722fc4ee9000166e521a06a6294ebffd), [`cc637c4`](https://github.com/vercel/workflow/commit/cc637c42ac80cbf79780a1190e46dc0f01850d4c), [`7e221fc`](https://github.com/vercel/workflow/commit/7e221fc9276b51f3cf7c597a5acdb781333b52dc), [`6455beb`](https://github.com/vercel/workflow/commit/6455bebd7dbc18e08fce5e3dede6df6ac4d7d7ff), [`72131a2`](https://github.com/vercel/workflow/commit/72131a227d3efbf2613104026976c3a0d887d1c6)]:
+  - @workflow/world-local@5.1.3
+  - @workflow/world@5.0.6
+  - @workflow/errors@5.0.6
+
 ## 5.0.5
 
 ### Patch Changes
