@@ -20,6 +20,7 @@
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import {
+  HookConflictError,
   HookReservedError,
   StreamError,
   WorkflowStartError,
@@ -218,6 +219,17 @@ describe('wire parity: guest serialize matches the reference codec', () => {
         cause.stack = 'cause-stack';
         const error = new WorkflowStartError('wrun_c', 'admission', cause);
         error.stack = 'start-stack';
+        return error;
+      },
+    ],
+    [
+      'HookConflictError of a refused start',
+      '(() => { const e = new Error(\'No run was created: workflow run "wrun_owner" already owns this hook token\\n\u2570\u25b6 docs: https://workflow-sdk.dev/err/hook-conflict\', { cause: undefined }); e.name = "HookConflictError"; e.stack = "conflict-stack"; e.token = "order:1"; e.conflictingRunId = "wrun_owner"; e.kind = "start"; return e; })()',
+      () => {
+        const error = new HookConflictError('order:1', 'wrun_owner', {
+          kind: 'start',
+        });
+        error.stack = 'conflict-stack';
         return error;
       },
     ],

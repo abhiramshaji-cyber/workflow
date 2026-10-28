@@ -670,6 +670,19 @@ export function createQuickJSSerde(
 
   const newGuestString = (value: string): JSValueHandle => vm.newString(value);
 
+  /**
+   * `HookConflictError`'s third constructor argument for a reduced value:
+   * `{ kind: 'start' }` for a refused `start({ hook })`, else undefined.
+   */
+  const startConflictOptions = (value: JSValueHandle): JSValueHandle => {
+    if (ownString(value, 'kind') !== 'start') return vm.undefined;
+    const options = vm.newObject();
+    const kind = vm.newString('start');
+    options.setProp('kind', kind);
+    kind.dispose();
+    return options;
+  };
+
   /** Collect Set values / Map entries via captured forEach. */
   const collect = (
     forEach: JSValueHandle,
@@ -1156,6 +1169,7 @@ export function createQuickJSSerde(
       } else {
         conflictingRunId?.dispose();
       }
+      if (ownString(value, 'kind') === 'start') reduced.kind = 'start';
       if (Object.hasOwn(shape, 'cause')) reduced.cause = shape.cause;
       return reduced;
     },
@@ -1863,12 +1877,14 @@ export function createQuickJSSerde(
       const cls = registeredErrorClass('@workflow/errors//HookConflictError');
       let error: JSValueHandle;
       if (cls) {
-        // Constructor takes (token, conflictingRunId).
+        // Constructor takes (token, conflictingRunId, { kind }).
         const token = own(value, 'token') ?? vm.undefined;
         const conflictingRunId = own(value, 'conflictingRunId') ?? vm.undefined;
-        error = vm.construct(cls, token, conflictingRunId);
+        const options = startConflictOptions(value);
+        error = vm.construct(cls, token, conflictingRunId, options);
         if (token !== vm.undefined) token.dispose();
         if (conflictingRunId !== vm.undefined) conflictingRunId.dispose();
+        if (options !== vm.undefined) options.dispose();
         const stack = own(value, 'stack');
         if (stack && !stack.isUndefined) define(error, 'stack', stack);
         stack?.dispose();
@@ -1890,6 +1906,9 @@ export function createQuickJSSerde(
           define(error, 'conflictingRunId', conflictingRunId);
         }
         conflictingRunId?.dispose();
+        const kind = own(value, 'kind');
+        if (kind && !kind.isUndefined) define(error, 'kind', kind);
+        kind?.dispose();
       }
       return error;
     },

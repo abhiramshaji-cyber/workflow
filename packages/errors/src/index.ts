@@ -825,16 +825,28 @@ export class WorkflowRunNotFoundError extends WorkflowError {
  * This is a user error: it means the same custom token was passed to
  * `createHook` in two or more concurrent runs. Use a unique token per run
  * (or omit the token to let the runtime generate one automatically).
+ *
+ * `start(workflow, args, { hook })` throws it with `kind: 'start'` for a
+ * duplicate start: no run was created, and `conflictingRunId` owns the token.
  */
 export class HookConflictError extends WorkflowError {
   token: string;
   // TODO: Make this required once all persisted hook_conflict events and World
   // implementations always include the active hook owner's run ID.
   conflictingRunId?: string;
+  /** `'start'` when a `start({ hook })` was refused; no run was created. */
+  kind?: 'start';
 
-  constructor(token: string, conflictingRunId?: string) {
+  constructor(
+    token: string,
+    conflictingRunId?: string,
+    options?: { kind?: 'start' }
+  ) {
     super(
-      `Hook token "${token}" is already in use by another workflow${conflictingRunId ? ` (run "${conflictingRunId}")` : ''}`,
+      options?.kind === 'start'
+        ? // Without the token: this message becomes the start span's status.
+          `No run was created: workflow run "${conflictingRunId}" already owns this hook token`
+        : `Hook token "${token}" is already in use by another workflow${conflictingRunId ? ` (run "${conflictingRunId}")` : ''}`,
       {
         slug: ERROR_SLUGS.HOOK_CONFLICT,
       }
@@ -844,6 +856,7 @@ export class HookConflictError extends WorkflowError {
     if (conflictingRunId !== undefined) {
       this.conflictingRunId = conflictingRunId;
     }
+    if (options?.kind !== undefined) this.kind = options.kind;
   }
 
   static is(value: unknown): value is HookConflictError {

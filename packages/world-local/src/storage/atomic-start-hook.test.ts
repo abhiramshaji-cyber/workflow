@@ -13,6 +13,7 @@ import {
   HookNotFoundError,
   HookReservedError,
   START_HOOK_ADMISSION_REJECTED,
+  START_HOOK_CANDIDATE_CANCELLED,
 } from '@workflow/errors';
 import { type AnyEventRequest, SPEC_VERSION_CURRENT } from '@workflow/world';
 import { monotonicFactory, ulid } from 'ulid';
@@ -30,7 +31,11 @@ import * as fsModule from '../fs.js';
 import { writeExclusive } from '../fs.js';
 import { createWorld } from '../index.js';
 import { createStorage } from '../storage.js';
-import { hookTokenClaimPath, START_HOOK_ORPHAN_GRACE_MS } from './helpers.js';
+import {
+  hookTokenClaimPath,
+  START_HOOK_ORPHAN_GRACE_MS,
+  startHookReservationMarkerPath,
+} from './helpers.js';
 
 const SPEC = SPEC_VERSION_CURRENT;
 const conformanceDirs: string[] = [];
@@ -76,10 +81,11 @@ atomicStartHookConformance({
     vi.setSystemTime(target);
   },
   // The state a process killed between its token claim and its run write
-  // leaves: the claim, and no run.
+  // leaves: the reservation marker and the claim, and no run.
   stageOrphan: async (runId, token) => {
     const dir = currentDir;
     if (!dir) throw new Error('no storage set up');
+    await stageReservationMarker(dir, runId);
     const claimPath = hookTokenClaimPath(dir, token);
     await fs.mkdir(path.dirname(claimPath), { recursive: true });
     await writeExclusive(
@@ -91,6 +97,13 @@ atomicStartHookConformance({
   // written was never reported admitted; it holds only for the lock grace.
   orphanHoldMs: START_HOOK_ORPHAN_GRACE_MS,
 });
+
+/** What admission writes before a candidate's reservation. */
+async function stageReservationMarker(dir: string, runId: string) {
+  const marker = startHookReservationMarkerPath(dir, runId);
+  await fs.mkdir(path.dirname(marker), { recursive: true });
+  await fs.writeFile(marker, JSON.stringify({ runId }));
+}
 
 describe('atomic start Hook (world-local)', () => {
   let testDir: string;
@@ -428,7 +441,7 @@ describe('atomic start Hook (world-local)', () => {
     }
   });
 
-  it('fences a cancelled run id only while it could still be created', async () => {
+  it('fences a cancelled run id only where a reservation was made for it, and only while it could still be created', async () => {
     const cancel = (runId: string) =>
       create(runId, {
         eventType: 'run_cancelled',
@@ -449,15 +462,59 @@ describe('atomic start Hook (world-local)', () => {
       name: 'WorkflowRunNotFoundError',
     });
 
-    const young = `wrun_${ulid()}`;
-    expect(await cancel(young)).toMatchObject({
+    // An ordinary id: not found, and nothing written.
+    const ordinary = `wrun_${ulid()}`;
+    expect(await cancel(ordinary)).toMatchObject({
       name: 'WorkflowRunNotFoundError',
     });
+    expect(await runFile(ordinary)).toBe(false);
+
+    const young = `wrun_${ulid()}`;
+    await stageReservationMarker(testDir, young);
+    expect(await cancel(young)).toMatchObject({
+      code: START_HOOK_CANDIDATE_CANCELLED,
+    });
     expect(await runFile(young)).toBe(true);
-    // Never listed as a run.
+    // Never listed as a run, and a second cancel answers the same.
     expect(
       (await storage.runs.list({})).data.some((r) => r.runId === young)
     ).toBe(false);
+    expect(await cancel(young)).toMatchObject({
+      code: START_HOOK_CANDIDATE_CANCELLED,
+    });
+  });
+
+  it('keeps an ordinary run creatable after a cancel that found nothing', async () => {
+    const ordinary = (eventType: 'run_created' | 'run_started') =>
+      ({
+        eventType,
+        specVersion: SPEC,
+        eventData: {
+          deploymentId: 'dpl_local',
+          workflowName: 'wf',
+          input: new Uint8Array([1]),
+        },
+      }) as AnyEventRequest;
+    const cancel = (runId: string) =>
+      create(runId, {
+        eventType: 'run_cancelled',
+        specVersion: SPEC,
+      } as AnyEventRequest).catch((e: unknown) => e);
+
+    // A resilient start cancelled before its run_started landed.
+    const resilient = `wrun_${ulid()}`;
+    expect(await cancel(resilient)).toMatchObject({
+      name: 'WorkflowRunNotFoundError',
+    });
+    expect((await create(resilient, ordinary('run_started'))).run?.runId).toBe(
+      resilient
+    );
+
+    const direct = `wrun_${ulid()}`;
+    await cancel(direct);
+    expect((await create(direct, ordinary('run_created'))).run?.runId).toBe(
+      direct
+    );
   });
 
   it('refuses a queued candidate older than the orphan bound with a permanent code', async () => {

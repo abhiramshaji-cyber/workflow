@@ -11,6 +11,8 @@ related:
 
 `HookReservedError` is thrown by [`resumeHook()`](/docs/api-reference/workflow-api/resume-hook) and [`getHookByToken()`](/docs/api-reference/workflow-api/get-hook-by-token) when the token is reserved by a run started with [`start({ hook })`](/docs/api-reference/workflow-api/start#prevent-duplicate-starts) that has not registered its hook (`createHook({ token })`) yet. The token has an owner, so this is not a [`HookNotFoundError`](/docs/api-reference/workflow-errors/hook-not-found-error): wait and retry, and the call succeeds once the owner registers the hook.
 
+Inside a step, `resumeHook()` and `getHookByToken()` already wait for the owner for up to 30 seconds, honoring `retryAfter`, before throwing `HookReservedError`, and the step's retries cover a longer wait. They don't wait when the token is reserved by the step's own run, which can't register the hook while the step runs. The loop below is for code outside a step, such as a webhook handler:
+
 ```typescript lineNumbers
 import { resumeHook } from "workflow/api";
 import { HookReservedError } from "workflow/errors";
@@ -32,7 +34,7 @@ async function resumeWhenLive() {
 }
 ```
 
-If the owner ends without registering the hook, or after registering and disposing it, the lookup answers `HookNotFoundError`. Inside a step, `resumeHook()` and `getHookByToken()` wait for the owner for up to 30 seconds, honoring `retryAfter`, before throwing `HookReservedError`; the step's retries cover a longer wait.
+If the owner ends without registering the hook, or after registering and disposing it, the lookup answers `HookNotFoundError`.
 
 ## API Signature
 

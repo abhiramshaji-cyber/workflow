@@ -151,6 +151,7 @@ export function getCommonReducers(): Partial<Reducers> {
       if ((value as any).conflictingRunId !== undefined) {
         reduced.conflictingRunId = (value as any).conflictingRunId;
       }
+      if ((value as any).kind === 'start') reduced.kind = 'start';
       if ('cause' in value) reduced.cause = (value as any).cause;
       return reduced;
     },
@@ -469,7 +470,11 @@ export function getCommonRevivers(): Partial<Revivers> {
       ];
       let error: Error;
       if (typeof Cls === 'function') {
-        error = new Cls(value.token, value.conflictingRunId);
+        error = new Cls(
+          value.token,
+          value.conflictingRunId,
+          value.kind === 'start' ? { kind: 'start' } : undefined
+        );
       } else {
         error = new Error(value.message);
         error.name = 'HookConflictError';
@@ -477,6 +482,7 @@ export function getCommonRevivers(): Partial<Revivers> {
         if (value.conflictingRunId !== undefined) {
           (error as any).conflictingRunId = value.conflictingRunId;
         }
+        if (value.kind === 'start') (error as any).kind = 'start';
       }
       if (value.stack !== undefined) error.stack = value.stack;
       if ('cause' in value) (error as any).cause = (value as any).cause;

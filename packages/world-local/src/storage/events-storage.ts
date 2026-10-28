@@ -10,6 +10,7 @@ import {
   RunExpiredError,
   RunNotSupportedError,
   START_HOOK_ADMISSION_REJECTED,
+  START_HOOK_CANDIDATE_CANCELLED,
   TooEarlyError,
   WorkflowRunNotFoundError,
   WorkflowWorldError,
@@ -116,6 +117,7 @@ import {
   type StartHookRejection,
   scanRunEventIds,
   startHookRejectionPath,
+  startHookReservationMarkerPath,
   withHookTokenClaimLock,
 } from './helpers.js';
 import {
@@ -545,6 +547,14 @@ async function admitStartHook({
     }
 
     signal.throwIfAborted();
+    // Before the claim: a cancellation that finds no run fences the id only
+    // where this marker says a reservation may exist.
+    await write(
+      startHookReservationMarkerPath(basedir, runId, tag),
+      JSON.stringify({ runId }),
+      { overwrite: true }
+    );
+    signal.throwIfAborted();
     const reservationClaim: HookTokenClaim = {
       runId,
       reservation: {
@@ -564,6 +574,8 @@ async function admitStartHook({
     signal.throwIfAborted();
     if (await writeRun()) {
       startHookLog('accepted a candidate', { runId });
+      // The run exists, so a cancellation finds it: the marker is done.
+      await deleteJSON(startHookReservationMarkerPath(basedir, runId, tag));
       return { status: 'created' };
     }
     // Created concurrently by an attempt that did not take this lock, which
@@ -1732,50 +1744,63 @@ export function createEventsStorage(
         eventId = await mintEventId(effectiveRunId);
 
         // Cancelling a run that was never created: it may be a
-        // `start({ hook })` candidate whose writer died before its run, whose
-        // queued copy could still create it. Fence its run record path so no
-        // copy ever can, then answer not found like any missing run. Only an
-        // id young enough to still be created is fenced: an older one (or a
-        // malformed one) can never become a run, and leaves nothing behind.
+        // `start({ hook })` candidate whose writer died between its
+        // reservation and its run, whose queued copy could still create it.
+        // Fence its run record path so no copy ever can, and answer
+        // START_HOOK_CANDIDATE_CANCELLED. Only an id a reservation was made
+        // for (its marker) and young enough to still be created is fenced:
+        // any other id answers not found and stays creatable, as on a World
+        // without start Hooks.
         const cancelledCandidateTime =
           !currentRun && data.eventType === 'run_cancelled'
             ? ulidToDate(effectiveRunId.replace(/^wrun_/, ''))
             : undefined;
         if (!currentRun && data.eventType === 'run_cancelled') {
-          if (
-            cancelledCandidateTime &&
+          const reserved =
+            cancelledCandidateTime != null &&
             Date.now() - cancelledCandidateTime.getTime() <=
               START_HOOK_CANDIDATE_MAX_AGE_MS &&
-            !(await fenceStartHookCandidate(
-              basedir,
-              effectiveRunId,
-              tag,
-              {}
-            ).then((fenced) => {
-              if (fenced) {
-                startHookLog('fenced a cancelled candidate with no run', {
-                  runId: effectiveRunId,
-                });
-              }
-              return fenced;
-            }))
-          ) {
-            const raced = await readJSONWithFallback(
+            (await fs
+              .access(
+                startHookReservationMarkerPath(basedir, effectiveRunId, tag)
+              )
+              .then(
+                () => true,
+                () => false
+              ));
+          const createdSince = () =>
+            readJSONWithFallback(
               basedir,
               'runs',
               effectiveRunId,
               RunRecordSchema,
               tag
             );
-            if (raced) {
-              // Created since the read above: the retry cancels it.
-              throw new WorkflowWorldError(
-                `Workflow run "${effectiveRunId}" was created while being cancelled; retry`,
-                { status: 503 }
-              );
-            }
+          const createdWhileCancelling = () =>
+            new WorkflowWorldError(
+              `Workflow run "${effectiveRunId}" was created while being cancelled; retry`,
+              { status: 503 }
+            );
+          if (!reserved) {
+            // A candidate created since the read above deletes its marker:
+            // the retry cancels the run.
+            if (await createdSince()) throw createdWhileCancelling();
+            throw new WorkflowRunNotFoundError(effectiveRunId);
           }
-          throw new WorkflowRunNotFoundError(effectiveRunId);
+          if (await fenceStartHookCandidate(basedir, effectiveRunId, tag, {})) {
+            startHookLog('fenced a cancelled candidate with no run', {
+              runId: effectiveRunId,
+            });
+          } else if (await createdSince()) {
+            // Created since the read above: the retry cancels it.
+            throw createdWhileCancelling();
+          }
+          // Fenced now, or already (an earlier cancellation's or a
+          // contender's fence): it can never become a run.
+          throw new WorkflowWorldError(
+            `Workflow run "${effectiveRunId}" was a start Hook candidate that never became a run; it is cancelled and can no longer be created`,
+            { status: 409, code: START_HOOK_CANDIDATE_CANCELLED }
+          );
         }
 
         // These events are rejected on a non-existent run to match the

@@ -3115,8 +3115,19 @@ function createUnfencedEventsStorage(
           });
           if (!owner) {
             throw new WorkflowWorldError(
-              `Hook token "${eventData.token}" changed owner while being claimed; retry`,
+              `The hook token of run "${effectiveRunId}" changed owner while being claimed; retry`,
               { status: 503 }
+            );
+          }
+          if (
+            owner.runId === effectiveRunId &&
+            owner.hookId === data.correlationId
+          ) {
+            // A concurrent write of this same hook_created committed first:
+            // the claim index, not the hookId arbiter, refused this one. A
+            // duplicate, not a conflict (see the blockingHook path above).
+            throw new EntityConflictError(
+              `hook_created for hook "${data.correlationId}" was already written`
             );
           }
           forceRefusedReason =

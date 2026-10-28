@@ -624,6 +624,21 @@ export function startHookRejectionPath(
   return taggedPath(basedir, path.join('hooks', 'admissions'), runId, tag);
 }
 
+/**
+ * Path of the marker that a `start({ hook })` candidate reserved a token.
+ * Written under the token claim lock before the reservation, so a
+ * `run_cancelled` that finds no run fences the id only when a reservation
+ * could have been made for it: an ordinary run id stays creatable after a
+ * cancellation that found nothing, as on a World without start Hooks.
+ */
+export function startHookReservationMarkerPath(
+  basedir: string,
+  runId: string,
+  tag?: string
+): string {
+  return taggedPath(basedir, path.join('hooks', 'reservations'), runId, tag);
+}
+
 export const StartHookRejectionSchema = z.object({
   runId: z.string(),
   token: z.string(),

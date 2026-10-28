@@ -307,6 +307,7 @@ export function getCommonReducers(
       if (conflictingRunId !== undefined) {
         reduced.conflictingRunId = conflictingRunId;
       }
+      if (readProperty(value, 'kind') === 'start') reduced.kind = 'start';
       return reduced;
     },
     HookForceClaimedError: (value) => {
@@ -556,7 +557,11 @@ export function getCommonRevivers(
         ((global as Record<symbol, unknown>)[
           Symbol.for('@workflow/errors//HookConflictError')
         ] as typeof HookConflictError | undefined) ?? HookConflictError;
-      const error = new Ctor(value.token, value.conflictingRunId);
+      const error = new Ctor(
+        value.token,
+        value.conflictingRunId,
+        value.kind === 'start' ? { kind: 'start' } : undefined
+      );
       if (value.stack !== undefined) error.stack = value.stack;
       if ('cause' in value) {
         (error as Error & { cause?: unknown }).cause = value.cause;

@@ -1182,6 +1182,31 @@ describe('a lookup of a reserved token', () => {
     expect(HookReservedError.is(await found)).toBe(true);
   });
 
+  it("inside a step of the reserving run itself, throws at once: its run can't register the hook while the step runs", async () => {
+    const getByToken = vi.fn().mockRejectedValue(reserved());
+    setWorld({
+      specVersion: SPEC_VERSION_CURRENT,
+      hooks: { getByToken },
+    } as unknown as World);
+
+    const error = await contextStorage
+      .run(
+        {
+          stepMetadata: {
+            stepName: 'route',
+            stepId: 'step_1',
+            stepStartedAt: new Date(),
+            attempt: 1,
+          },
+          workflowMetadata: { workflowRunId: hook.runId },
+        } as any,
+        () => getHookByToken(hook.token)
+      )
+      .catch((e: unknown) => e);
+    expect(HookReservedError.is(error)).toBe(true);
+    expect(getByToken).toHaveBeenCalledTimes(1);
+  });
+
   it('outside a step, throws HookReservedError at once', async () => {
     const getByToken = vi.fn().mockRejectedValue(reserved());
     setWorld({

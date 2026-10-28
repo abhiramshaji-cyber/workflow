@@ -321,7 +321,13 @@ Maximum [`experimental_minRetention`](/docs/api-reference/workflow/create-hook#k
 
 Set to `1` (or `true`) to enable [`start({ hook })`](/docs/api-reference/workflow-api/start#prevent-duplicate-starts) on the Postgres World. Off by default; without it, `start({ hook })` throws before it enqueues anything.
 
-Every worker that serves the database must run a version with start Hook support before you turn it on, because the queue does not route by deployment: an older worker that picks up a candidate's queued message creates its run without the reservation, and the start is no longer idempotent (`start()` reports that the World did not confirm the reservation). For the same reason, don't roll back past migration `0028_add_start_hook_admissions` while reservations are live.
+Every process that uses the database must run a version with start Hook support before you turn it on: queue workers, and every process that reads Hooks, such as resume and webhook handlers, the CLI and the dashboard.
+- **Queue workers.** The queue does not route by deployment. An older worker that picks up a candidate's queued message creates its run without the reservation, and the start is no longer idempotent (`start()` reports that the World did not confirm the reservation).
+- **Readers.** A reservation is a placeholder row in `workflow_hooks`. An older version's token lookup can return that row as if it were the run's Hook, so a resume through it reports success while nobody receives the payload.
+
+For the same reason, don't roll back past migration `0028_add_start_hook_admissions` while reservations are live.
+
+Migration `0028_add_start_hook_admissions` is required even with this variable unset, because every Hook insert writes its `claims_token` column. It takes table locks on `workflow_runs` and `workflow_hooks`, and gives up after 10 seconds (unless the session sets its own `lock_timeout`), leaving the migration to retry, rather than stall traffic. Apply it with the rest of the migrations before deploying this version.
 
 ### `WORKFLOW_QUEUE_NAMESPACE`
 

@@ -194,10 +194,10 @@ export async function decideStartHookAdmission(
           claimsToken: true,
           isStartReservation: true,
         })
-        .onConflictDoNothing({
-          target: hooks.token,
-          where: sql`${hooks.claimsToken}`,
-        })
+        // Untargeted: the claim index arbitrates other runs, and the
+        // placeholder's own id (`shr_<runId>`) the other copy of this same
+        // candidate, which would otherwise fail on the primary key.
+        .onConflictDoNothing()
         .returning({ hookId: hooks.hookId });
   if (!placeholder) {
     // Another claim committed first (the unique insert waited for it): the
@@ -209,7 +209,7 @@ export async function decideStartHookAdmission(
       owner ?? (await findActiveTokenOwner(tx, startHook.token, runId));
     if (!conflictingRunId) {
       throw new WorkflowWorldError(
-        `Hook token "${startHook.token}" changed owner while being admitted; retry`,
+        `The start Hook token of candidate "${runId}" changed owner while being admitted; retry`,
         { status: 503 }
       );
     }
@@ -320,7 +320,9 @@ async function deleteExpiredDecisions(tx: DrizzleTransaction): Promise<void> {
     Date.now() - START_HOOK_CANDIDATE_MAX_AGE_MS - 60 * 60 * 1000
   );
   await tx.execute(
-    sql`delete from ${admissions} where ${admissions.runId} in (select ${admissions.runId} from ${admissions} where ${admissions.createdAt} < ${cutoff.toISOString()}::timestamptz limit 100)`
+    // SKIP LOCKED: rows another admission is already deleting are left to
+    // it, so admissions of unrelated tokens never wait on each other here.
+    sql`delete from ${admissions} where ${admissions.runId} in (select ${admissions.runId} from ${admissions} where ${admissions.createdAt} < ${cutoff.toISOString()}::timestamptz limit 100 for update skip locked)`
   );
 }
 

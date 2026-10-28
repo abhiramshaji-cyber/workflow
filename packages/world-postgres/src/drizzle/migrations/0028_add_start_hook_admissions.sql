@@ -1,6 +1,20 @@
 -- Atomic `start({ hook })` admission: one immutable accept-or-reject decision
 -- per candidate run, written in the transaction that creates an accepted run.
 -- Rows older than a candidate's 24h window are deleted as admissions go.
+--
+-- Required even with start Hooks off: every Hook insert writes `claims_token`.
+-- The column additions and the unique index take locks that queue every
+-- other query on workflow_runs and workflow_hooks behind them, so give up
+-- after 10 seconds (unless the session set its own `lock_timeout`) and leave
+-- the migration unapplied and retryable rather than stall the World. The
+-- setting lasts for the migrator's transaction.
+DO $$
+BEGIN
+  IF current_setting('lock_timeout') = '0' THEN
+    PERFORM set_config('lock_timeout', '10s', true);
+  END IF;
+END $$;
+--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "workflow"."workflow_start_hook_admissions" (
 	"run_id" varchar PRIMARY KEY NOT NULL,
 	"token" varchar NOT NULL,

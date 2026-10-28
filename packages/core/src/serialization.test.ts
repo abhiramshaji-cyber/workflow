@@ -4823,6 +4823,19 @@ describe('Workflow error serialization', () => {
     expect(hydrated.message).toContain('wrun_conflicting');
   });
 
+  it("should round-trip a refused start's HookConflictError with its start wording", async () => {
+    const error = new HookConflictError('approval-token', 'wrun_owner', {
+      kind: 'start',
+    });
+    const hydrated = (await roundTrip(error)) as HookConflictError;
+    expect(hydrated).toBeInstanceOf(HookConflictError);
+    expect(hydrated.kind).toBe('start');
+    expect(hydrated.message).toMatch(
+      /^No run was created: workflow run "wrun_owner" already owns this hook token/
+    );
+    expect(hydrated.message).not.toContain('approval-token');
+  });
+
   it('should round-trip WorkflowStartError preserving the candidate and stage', async () => {
     const error = new WorkflowStartError(
       'wrun_candidate',

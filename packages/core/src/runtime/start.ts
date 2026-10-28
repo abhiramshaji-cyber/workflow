@@ -434,10 +434,6 @@ export function normalizeStartHook(options: StartHookOptions): StartHook {
   return { token: options.token, tokenRetentionUntil };
 }
 
-/**
- * A deterministic refusal to use `start({ hook })` against a World (or target
- * deployment) that cannot admit it. Nothing was published.
- */
 type StartHookOutcome = 'accepted' | 'rejected' | 'uncertain' | 'failed';
 
 /** What `workflow.start_hook.error_code` records for `error`. */
@@ -459,6 +455,11 @@ function startHookRejectionReason(error: unknown): string | undefined {
     : undefined;
 }
 
+/**
+ * A deterministic refusal to use `start({ hook })` against a World (or target
+ * deployment) that cannot admit it, or a World answer that broke the
+ * admission contract. Nothing was published.
+ */
 function startHookContractError(message: string): WorkflowWorldError {
   return new WorkflowWorldError(`${message} No run was created.`, {
     code: RUN_ERROR_CODES.WORLD_CONTRACT_ERROR,
@@ -910,7 +911,7 @@ export async function start<TArgs extends unknown[], TResult>(
         // cross-deployment target is checked again below, from its probe.
         if (world.capabilities?.atomicStartHook?.active !== true) {
           throw startHookContractError(
-            'start({ hook }) requires a World that supports atomic start Hooks, and the configured World does not.'
+            'start({ hook }) requires a World that supports atomic start Hooks, and the configured World does not. On the Postgres World, set WORKFLOW_POSTGRES_EXPERIMENTAL_START_HOOK=1; on the Vercel World, WORKFLOW_VERCEL_EXPERIMENTAL_START_HOOK=1.'
           );
         }
         if (
@@ -1628,9 +1629,6 @@ export async function start<TArgs extends unknown[], TResult>(
                     error.conflictingRunId
                   )
                 );
-                // Say what happened to this start, without the token (the
-                // message becomes the span's status).
-                error.message = `No run was created: workflow run "${error.conflictingRunId}" already owns this hook token`;
                 // A holder stuck pending (its first message lost) would hold
                 // the token forever: wake it. Best effort and in the
                 // background, so the refusal is thrown without waiting.
@@ -1642,7 +1640,14 @@ export async function start<TArgs extends unknown[], TResult>(
                   ),
                   () => {}
                 );
-                throw error;
+                // Says what happened to this start, without the token (the
+                // message becomes the span's status), and keeps saying it
+                // across a step boundary.
+                throw new HookConflictError(
+                  error.token,
+                  error.conflictingRunId,
+                  { kind: 'start' }
+                );
               }
               if (EntityConflictError.is(error)) {
                 // Admission must replay the candidate's decision. A plain

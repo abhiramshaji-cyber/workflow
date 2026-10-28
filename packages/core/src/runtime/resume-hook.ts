@@ -335,7 +335,11 @@ async function getByTokenAwaitingOwner(
   /** Whether this lookup follows a takeover of the token mid-resume. */
   redirected = false
 ): Promise<ResumableHook> {
-  const inStep = contextStorage.getStore()?.stepMetadata !== undefined;
+  const store = contextStorage.getStore();
+  const inStep = store?.stepMetadata !== undefined;
+  // A step of the run that holds the reservation: its run cannot register the
+  // Hook while this step runs, so waiting could never succeed.
+  const ownRunId = store?.workflowMetadata?.workflowRunId;
   const deadline = Date.now() + HOOK_RESERVED_STEP_WAIT_MS;
   let waits = 0;
   let waitedMs = 0;
@@ -357,7 +361,11 @@ async function getByTokenAwaitingOwner(
     } catch (error) {
       if (HookReservedError.is(error)) {
         const waitMs = Math.max(1, error.retryAfter ?? 1) * 1000;
-        if (inStep && Date.now() + waitMs <= deadline) {
+        if (
+          inStep &&
+          error.runId !== ownRunId &&
+          Date.now() + waitMs <= deadline
+        ) {
           const before = Date.now();
           await new Promise((resolve) => setTimeout(resolve, waitMs));
           waits++;

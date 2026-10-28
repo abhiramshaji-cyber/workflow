@@ -223,6 +223,56 @@ describe('atomic start Hook (world-postgres)', () => {
     });
   });
 
+  test('concurrent duplicates of one hook_created are one Hook, never a conflict with itself', async () => {
+    const second = createEventsStorage(createClient(pool));
+    for (let round = 0; round < 300; round++) {
+      const runId = await runningRun();
+      const created = hookCreated(`dup-${ulid()}`);
+      const results = await Promise.allSettled([
+        events.create(runId, created),
+        second.create(runId, created),
+      ]);
+      for (const result of results) {
+        if (result.status === 'rejected') {
+          expect(result.reason).toMatchObject({ name: 'EntityConflictError' });
+        } else {
+          expect(result.value.event?.eventType).toBe('hook_created');
+        }
+      }
+      const { rows } = await pool.query(
+        `SELECT type, count(*)::int AS n FROM workflow.workflow_events
+          WHERE run_id = $1 AND type IN ('hook_created', 'hook_conflict')
+          GROUP BY type`,
+        [runId]
+      );
+      expect(rows).toEqual([{ type: 'hook_created', n: 1 }]);
+    }
+  });
+
+  test("an admitted candidate's concurrent copies both learn the admission", async () => {
+    const second = createEventsStorage(createClient(pool));
+    for (let round = 0; round < 20; round++) {
+      const token = `admitted-${ulid()}`;
+      const candidate = `wrun_${ulid()}`;
+      const results = await Promise.allSettled([
+        events.create(candidate, runCreated({ token })),
+        second.create(candidate, {
+          ...runCreated({ token }),
+          eventType: 'run_started',
+        } as AnyEventRequest),
+      ]);
+      // No raw primary-key violation on the shared placeholder id: each copy
+      // admits it or replays the other's admission.
+      for (const result of results) {
+        if (result.status === 'rejected') {
+          expect(String(result.reason)).not.toMatch(/pkey|23505/);
+          expect(result.reason).toMatchObject({ name: 'EntityConflictError' });
+        }
+      }
+      expect((await runs.get(candidate)).startHook?.token).toBe(token);
+    }
+  });
+
   test("a refused candidate's concurrent copies both answer the owner", async () => {
     const token = `refused-${ulid()}`;
     const owner = `wrun_${ulid()}`;
