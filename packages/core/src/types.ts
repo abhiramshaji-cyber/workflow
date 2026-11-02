@@ -15,7 +15,8 @@ export function getErrorMessage(v: unknown): string {
 
 export function getErrorStack(v: unknown): string {
   if (types.isNativeError(v)) {
-    return v.stack ?? '';
+    const stack = readProperty(v, 'stack');
+    return typeof stack === 'string' ? stack : '';
   }
   return '';
 }
@@ -138,15 +139,33 @@ export interface NormalizedUnknownError {
   name: string;
   message: string;
   stack: string;
+  unwrapped?: unknown;
 }
 
-const THROWN_THENABLE_TIMEOUT_MS = 10_000;
+export const THROWN_THENABLE_TIMEOUT_MS = 10_000;
+const MAX_TIMER_MS = 2_147_483_647;
 const THENABLE_MAX_DEPTH = 8;
+
+export function getThrownThenableTimeoutMs(): number {
+  return envNumber(
+    'WORKFLOW_THROWN_THENABLE_TIMEOUT_MS',
+    THROWN_THENABLE_TIMEOUT_MS,
+    { integer: true, min: 1, max: MAX_TIMER_MS }
+  );
+}
 
 type Then = (
   onFulfilled: (value: unknown) => void,
   onRejected: (reason: unknown) => void
 ) => unknown;
+
+function readProperty(value: object, key: string): unknown {
+  try {
+    return (value as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+}
 
 function getThen(value: unknown): Then | undefined {
   if (
@@ -155,12 +174,8 @@ function getThen(value: unknown): Then | undefined {
   ) {
     return undefined;
   }
-  try {
-    const then = (value as { then?: unknown }).then;
-    return typeof then === 'function' ? (then as Then) : undefined;
-  } catch {
-    return undefined;
-  }
+  const then = readProperty(value as object, 'then');
+  return typeof then === 'function' ? (then as Then) : undefined;
 }
 
 // settlements are boxed so a thenable never reaches native promise adoption
@@ -179,6 +194,10 @@ function settle(value: unknown, then: Then): Promise<{ value: unknown }> {
 }
 
 function describeValue(v: unknown): string {
+  if (typeof v === 'function') {
+    const name = readProperty(v, 'name');
+    return typeof name === 'string' && name ? `function ${name}` : 'function';
+  }
   try {
     return JSON.stringify(v) ?? String(v);
   } catch {
@@ -192,10 +211,12 @@ function describeValue(v: unknown): string {
 
 function normalizeSyncError(v: unknown): NormalizedUnknownError {
   if (types.isNativeError(v)) {
+    const name = readProperty(v, 'name');
+    const message = readProperty(v, 'message');
     return {
-      name: v.name,
-      message: v.message,
-      stack: v.stack ?? '',
+      name: typeof name === 'string' ? name : 'Error',
+      message: typeof message === 'string' ? message : describeValue(message),
+      stack: getErrorStack(v),
     };
   }
 
@@ -206,11 +227,12 @@ function normalizeSyncError(v: unknown): NormalizedUnknownError {
   };
 }
 
-function readProperty(value: object, key: 'cause' | 'errors'): unknown {
+function readErrors(value: object): unknown[] {
   try {
-    return (value as Record<string, unknown>)[key];
+    const errors = readProperty(value, 'errors');
+    return Array.isArray(errors) ? [...errors] : [];
   } catch {
-    return undefined;
+    return [];
   }
 }
 
@@ -223,37 +245,44 @@ function isPrimitive(value: unknown): boolean {
 
 export function toPlainError(
   value: unknown,
-  { name, message, stack }: NormalizedUnknownError,
-  seen = new WeakSet<object>()
+  normalized: NormalizedUnknownError,
+  path: unknown[] = []
 ): Error {
-  const error = Object.assign(new Error(message), { name, stack });
-  if (typeof value !== 'object' || value === null) return error;
-  seen.add(value);
+  const expand =
+    typeof value === 'object' &&
+    value !== null &&
+    path.length < MAX_CAUSE_LINKS &&
+    !path.includes(value);
+  const name =
+    !expand && normalized.name === 'AggregateError' ? 'Error' : normalized.name;
+  const error = Object.assign(new Error(normalized.message), {
+    name,
+    stack: normalized.stack,
+  });
+  if (!expand) return error;
 
-  const reduce = (member: unknown): unknown => {
-    if (isPrimitive(member)) return member;
-    const normalized = normalizeSyncError(member);
-    return seen.has(member as object)
-      ? Object.assign(new Error(normalized.message), {
-          name: 'Error',
-          stack: normalized.stack,
-        })
-      : toPlainError(member, normalized, seen);
-  };
-
+  path.push(value);
+  const reduce = (link: unknown): unknown =>
+    isPrimitive(link)
+      ? link
+      : toPlainError(link, normalizeSyncError(link), path);
   const cause = readProperty(value, 'cause');
   if (cause !== undefined) Object.assign(error, { cause: reduce(cause) });
-  if (name !== 'AggregateError') return error;
-
   // the AggregateError reviver throws when errors is missing
-  const errors = readProperty(value, 'errors');
-  return Object.assign(error, {
-    errors: Array.isArray(errors) ? errors.map(reduce) : [],
-  });
+  if (name === 'AggregateError') {
+    Object.assign(error, { errors: readErrors(value).map(reduce) });
+  }
+  path.pop();
+  return error;
 }
 
 function promiseRejection(message: string): NormalizedUnknownError {
-  return { name: 'Error', message: `Promise rejection: ${message}`, stack: '' };
+  const normalized = {
+    name: 'Error',
+    message: `Promise rejection: ${message}`,
+    stack: '',
+  };
+  return { ...normalized, unwrapped: toPlainError(undefined, normalized) };
 }
 
 /**
@@ -267,11 +296,7 @@ export async function normalizeUnknownError(
   let then = getThen(value);
   if (!then) return normalizeSyncError(value);
 
-  const timeoutMs = envNumber(
-    'WORKFLOW_THROWN_THENABLE_TIMEOUT_MS',
-    THROWN_THENABLE_TIMEOUT_MS,
-    { integer: true, min: 1 }
-  );
+  const timeoutMs = getThrownThenableTimeoutMs();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<undefined>((resolve) => {
     timer = setTimeout(() => resolve(undefined), timeoutMs);
@@ -298,6 +323,7 @@ export async function normalizeUnknownError(
     return {
       ...normalized,
       message: `Promise rejection: ${normalized.message}`,
+      unwrapped: current,
     };
   } finally {
     clearTimeout(timer);

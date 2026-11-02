@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   formatErrorCauseChain,
   getErrorMessage,
+  getThrownThenableTimeoutMs,
   isAbortError,
   normalizeUnknownError,
   promoteAbortErrorToFatal,
@@ -244,9 +245,11 @@ describe('normalizeUnknownError', () => {
       then() {},
     });
     await vi.runAllTimersAsync();
-    await expect(normalized).resolves.toMatchObject({
-      message: expect.stringMatching(/did not settle/),
-    });
+    const result = await normalized;
+    expect(result.message).toBe(
+      'Promise rejection: thrown thenable did not settle within 10000ms'
+    );
+    expect(result.unwrapped).toMatchObject({ message: result.message });
   });
 
   it('waits for a thrown promise that settles after a few seconds', async () => {
@@ -307,8 +310,10 @@ describe('normalizeUnknownError', () => {
         throw new Error('getter exploded');
       },
     };
-    await expect(normalizeUnknownError(thrown)).resolves.toMatchObject({
+    await expect(normalizeUnknownError(thrown)).resolves.toEqual({
       name: 'Error',
+      message: '[object Object]',
+      stack: '',
     });
   });
 
@@ -321,9 +326,60 @@ describe('normalizeUnknownError', () => {
         throw new Error('no string');
       },
     };
-    await expect(normalizeUnknownError(thrown)).resolves.toMatchObject({
+    await expect(normalizeUnknownError(thrown)).resolves.toEqual({
       name: 'Error',
-      message: expect.any(String),
+      message: 'object',
+      stack: '',
+    });
+  });
+
+  it('describes a thrown function by its name, never its source', async () => {
+    function leakyHandler() {
+      return 'sk_live_secret';
+    }
+    const normalized = await normalizeUnknownError(leakyHandler);
+    expect(normalized.message).toBe('function leakyHandler');
+  });
+
+  it('describes an error whose message and stack are not strings', async () => {
+    const thrown = Object.assign(new Error(), {
+      message: { status: 503 },
+      stack: { frames: [] },
+    });
+    await expect(normalizeUnknownError(thrown)).resolves.toEqual({
+      name: 'Error',
+      message: '{"status":503}',
+      stack: '',
+    });
+  });
+
+  it('hands back the settled reason so its cause can be recorded', async () => {
+    const reason = new Error('outer', { cause: new Error('inner') });
+    const thrown = Promise.reject(reason);
+    await expect(normalizeUnknownError(thrown)).resolves.toMatchObject({
+      message: 'Promise rejection: outer',
+      unwrapped: reason,
+    });
+  });
+
+  it('clamps the settle limit to the largest timer node accepts', async () => {
+    vi.useFakeTimers();
+    vi.stubEnv('WORKFLOW_THROWN_THENABLE_TIMEOUT_MS', '3000000000');
+    expect(getThrownThenableTimeoutMs()).toBe(2_147_483_647);
+
+    let settled = false;
+    const normalized = normalizeUnknownError({
+      // biome-ignore lint/suspicious/noThenProperty: Intentionally thenable
+      then() {},
+    }).then((result) => {
+      settled = true;
+      return result;
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(settled).toBe(false);
+    await vi.runAllTimersAsync();
+    await expect(normalized).resolves.toMatchObject({
+      message: expect.stringMatching(/within 2147483647ms/),
     });
   });
 });
@@ -374,15 +430,54 @@ describe('toPlainError', () => {
     expect(toPlainError(error, describeAs(error)).cause).toBeUndefined();
   });
 
+  it('keeps every copy of a member that appears twice', () => {
+    const shared = new TypeError('timeout', { cause: 'socket closed' });
+    const aggregate = new AggregateError([shared, shared], 'all failed');
+
+    const plain = toPlainError(
+      aggregate,
+      describeAs(aggregate)
+    ) as AggregateError;
+    for (const member of plain.errors) {
+      expect(member).toMatchObject({ name: 'TypeError', message: 'timeout' });
+      expect(member.cause).toBe('socket closed');
+    }
+  });
+
+  it('stops a very deep cause chain after a few links', () => {
+    let error = new Error('root');
+    for (let link = 0; link < 50_000; link++) {
+      error = new Error(`link ${link}`, { cause: error });
+    }
+
+    let depth = 0;
+    for (
+      let current: unknown = toPlainError(error, describeAs(error));
+      current instanceof Error;
+      current = current.cause
+    ) {
+      depth++;
+    }
+    expect(depth).toBe(5);
+  });
+
+  it('stops a cause getter that returns a new error on every read', () => {
+    const endless = (): Error =>
+      Object.defineProperty(new Error('again'), 'cause', { get: endless });
+    const error = endless();
+
+    expect(() => toPlainError(error, describeAs(error))).not.toThrow();
+  });
+
   it('keeps a cyclic cause chain finite', () => {
-    const first = new Error('first');
+    const first = new TypeError('first');
     const second = new Error('second', { cause: first });
     first.cause = second;
 
     const plain = toPlainError(first, describeAs(first));
     const cause = plain.cause as Error;
     expect(cause.message).toBe('second');
-    expect((cause.cause as Error).message).toBe('first');
+    expect(cause.cause).toMatchObject({ name: 'TypeError', message: 'first' });
     expect((cause.cause as Error).cause).toBeUndefined();
   });
 

@@ -948,33 +948,38 @@ export async function executeStep(
       const normalizedStack =
         normalizedError.stack || getErrorStack(effectiveErr) || '';
 
+      const thrown =
+        'unwrapped' in normalizedError
+          ? normalizedError.unwrapped
+          : effectiveErr;
+
       const dehydrateFailure = async (
         value: unknown,
-        { name, message, stack }: NormalizedUnknownError
+        fallback: NormalizedUnknownError
       ) => {
         const key = await getEncryptionKey();
-        try {
-          return await dehydrateStepError(
-            value,
+        const dehydrate = (error: unknown) =>
+          dehydrateStepError(
+            error,
             workflowRunId,
             key,
             [],
             globalThis,
             compression
           );
+        try {
+          return await dehydrate(value);
         } catch (error) {
+          const plain = await dehydrate(toPlainError(value, fallback)).catch(
+            () => {
+              throw error;
+            }
+          );
           stepLogger.warn(
-            'Step error could not be serialized, recording its name, message and stack only',
+            'Step error could not be serialized, recording it as plain errors',
             { workflowRunId, stepName, message: getErrorMessage(error) }
           );
-          return dehydrateStepError(
-            toPlainError(value, { name, message, stack }),
-            workflowRunId,
-            key,
-            [],
-            globalThis,
-            compression
-          );
+          return plain;
         }
       };
 
@@ -1058,7 +1063,7 @@ export async function executeStep(
           setErrorStack(effectiveErr, normalizedStack);
         }
         return writeFailed(
-          effectiveErr,
+          thrown,
           { ...normalizedError, stack: normalizedStack },
           Attribute.StepFatalError(true)
         );
@@ -1071,7 +1076,7 @@ export async function executeStep(
 
       const writeExhausted = (message: string) => {
         const wrappedError = new FatalError(message);
-        (wrappedError as Error).cause = err;
+        (wrappedError as Error).cause = thrown;
         if (normalizedStack) wrappedError.stack = normalizedStack;
         return writeFailed(
           wrappedError,
@@ -1137,7 +1142,7 @@ export async function executeStep(
           eventData: {
             stepName,
             attempt,
-            error: await dehydrateFailure(err, {
+            error: await dehydrateFailure(thrown, {
               ...normalizedError,
               stack: normalizedStack,
             }),

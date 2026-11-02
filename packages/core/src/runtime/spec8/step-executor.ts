@@ -1308,33 +1308,38 @@ export async function executeStep(
       const normalizedStack =
         normalizedError.stack || getErrorStack(effectiveErr) || '';
 
+      const thrown =
+        'unwrapped' in normalizedError
+          ? normalizedError.unwrapped
+          : effectiveErr;
+
       const dehydrateFailure = async (
         value: unknown,
-        { name, message, stack }: NormalizedUnknownError
+        fallback: NormalizedUnknownError
       ) => {
         const key = await getEncryptionKey();
-        try {
-          return await dehydrateStepError(
-            value,
+        const dehydrate = (error: unknown) =>
+          dehydrateStepError(
+            error,
             workflowRunId,
             key,
             [],
             globalThis,
             compression
           );
+        try {
+          return await dehydrate(value);
         } catch (error) {
+          const plain = await dehydrate(toPlainError(value, fallback)).catch(
+            () => {
+              throw error;
+            }
+          );
           stepLogger.warn(
-            'Step error could not be serialized, recording its name, message and stack only',
+            'Step error could not be serialized, recording it as plain errors',
             { workflowRunId, stepName, message: getErrorMessage(error) }
           );
-          return dehydrateStepError(
-            toPlainError(value, { name, message, stack }),
-            workflowRunId,
-            key,
-            [],
-            globalThis,
-            compression
-          );
+          return plain;
         }
       };
 
@@ -1387,7 +1392,7 @@ export async function executeStep(
               correlationId: stepId,
               eventData: {
                 stepName,
-                error: await dehydrateFailure(effectiveErr, {
+                error: await dehydrateFailure(thrown, {
                   ...normalizedError,
                   stack: normalizedStack,
                 }),
@@ -1446,7 +1451,7 @@ export async function executeStep(
         // error while the original failure remains recoverable from
         // `err.cause` after hydration.
         const wrappedError = new FatalError(errorMessage);
-        (wrappedError as Error).cause = err;
+        (wrappedError as Error).cause = thrown;
         if (normalizedStack) wrappedError.stack = normalizedStack;
         try {
           await createEvent(
@@ -1519,7 +1524,7 @@ export async function executeStep(
           correlationId: stepId,
           eventData: {
             stepName,
-            error: await dehydrateFailure(err, {
+            error: await dehydrateFailure(thrown, {
               ...normalizedError,
               stack: normalizedStack,
             }),

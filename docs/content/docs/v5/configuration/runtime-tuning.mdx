@@ -362,7 +362,7 @@ These variables are primarily for tests, debugging, or unusual deployments.
 ### `WORKFLOW_THROWN_THENABLE_TIMEOUT_MS`
 
 - Default: `10000` (10 seconds)
-- Maximum time a step waits for a thrown promise or thenable to settle, so its reason can be recorded as the step error (for example `throw res.json()`). If it has not settled by then, the step records `thrown thenable did not settle within <limit>ms` and retries or fails as usual. Raise it if upstream error bodies routinely take longer to arrive.
+- Maximum time a step waits for a thrown promise or thenable to settle, so its reason can be recorded as the step error (for example `throw res.json()`). If it has not settled by then, the step records `thrown thenable did not settle within <limit>ms` and retries or fails as usual. Raise it if upstream error bodies routinely take longer to arrive. Values above `2147483647`, the largest timer Node.js accepts, are clamped to it.
 
 ### `WORKFLOW_STREAM_MAX_INFLIGHT_CHUNKS`
 

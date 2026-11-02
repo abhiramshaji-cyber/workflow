@@ -7,7 +7,7 @@ import { createWorld } from '@workflow/world-local';
 import { ulid } from 'ulid';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LOCK_POLL_INTERVAL_MS } from '../../flushable-stream.js';
-import { runtimeLogger } from '../../logger.js';
+import { runtimeLogger, stepLogger } from '../../logger.js';
 import { registerStepFunction } from '../../private.js';
 import {
   dehydrateStepArguments,
@@ -1311,10 +1311,12 @@ describe('executeStep — thrown errors with a read-only stack', () => {
 
   async function runThrowingStep(
     makeError: () => unknown,
-    maxRetries = MAX_RETRIES
+    maxRetries = MAX_RETRIES,
+    prepareWorld: (world: World) => void = () => {}
   ) {
     const world = makeWorld();
     setWorld(world);
+    prepareWorld(world);
     const stepName = uniqueStepName();
     const { runId, stepId } = await setupRunningStep({
       world,
@@ -1417,7 +1419,44 @@ describe('executeStep — thrown errors with a read-only stack', () => {
     const { world, runId, stepId, result } = await runThrowingStep(() => chain);
 
     expect(result.type).toBe('retry');
-    await hydratedErrorOf(world, runId, stepId, 'step_retrying');
+    const hydrated = await hydratedErrorOf(
+      world,
+      runId,
+      stepId,
+      'step_retrying'
+    );
+    expect(hydrated.message).toBe(
+      'Promise rejection: thrown thenable kept resolving to another thenable after 8 steps'
+    );
+  });
+
+  it('records the reason and its cause when the step throws a rejected promise', async () => {
+    const warn = vi.spyOn(stepLogger, 'warn');
+    try {
+      const { world, runId, stepId, result } = await runThrowingStep(() => {
+        const thrown = Promise.reject(
+          new Error('outer', { cause: new Error('inner') })
+        );
+        thrown.catch(() => {});
+        return thrown;
+      });
+
+      expect(result.type).toBe('retry');
+      const hydrated = await hydratedErrorOf(
+        world,
+        runId,
+        stepId,
+        'step_retrying'
+      );
+      expect(hydrated.message).toBe('outer');
+      expect((hydrated.cause as Error).message).toBe('inner');
+      expect(warn).not.toHaveBeenCalledWith(
+        expect.stringMatching(/could not be serialized/),
+        expect.anything()
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   class ApiResponse {
@@ -1504,6 +1543,72 @@ describe('executeStep — thrown errors with a read-only stack', () => {
     expect(((member.cause as Error).cause as Error).message).toBe(
       '{"status":503}'
     );
+  });
+
+  it('records a retry when an unserializable cause sits under a very deep chain', async () => {
+    const { world, runId, stepId, result } = await runThrowingStep(() => {
+      let error: Error = Object.assign(new Error('leaf'), {
+        cause: new ApiResponse(),
+      });
+      for (let link = 0; link < 50_000; link++) {
+        error = new Error(`link ${link}`, { cause: error });
+      }
+      return error;
+    });
+
+    expect(result.type).toBe('retry');
+    const hydrated = await hydratedErrorOf(
+      world,
+      runId,
+      stepId,
+      'step_retrying'
+    );
+    expect(hydrated.message).toBe('link 49999');
+  });
+
+  it('records a retry when the error has a stack that is not a string', async () => {
+    const { world, runId, stepId, result } = await runThrowingStep(() =>
+      Object.assign(new Error('upstream returned 503'), {
+        stack: new ApiResponse(),
+        cause: new ApiResponse(),
+      })
+    );
+
+    expect(result.type).toBe('retry');
+    const hydrated = await hydratedErrorOf(
+      world,
+      runId,
+      stepId,
+      'step_retrying'
+    );
+    expect(hydrated.message).toBe('upstream returned 503');
+  });
+
+  it('rethrows an encryption failure without treating it as unserializable', async () => {
+    const warn = vi.spyOn(stepLogger, 'warn');
+    const encrypt = vi.spyOn(globalThis.crypto.subtle, 'encrypt');
+    try {
+      await expect(
+        runThrowingStep(
+          () => {
+            encrypt.mockRejectedValue(new Error('key service down'));
+            return new Error('upstream returned 503');
+          },
+          MAX_RETRIES,
+          (world) => {
+            world.getEncryptionKeyForRun = async () => new Uint8Array(32);
+          }
+        )
+      ).rejects.toThrow();
+      expect(encrypt).toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalledWith(
+        expect.stringMatching(/could not be serialized/),
+        expect.anything()
+      );
+    } finally {
+      encrypt.mockRestore();
+      warn.mockRestore();
+    }
   });
 
   it('records the final failure when the last attempt throws an unserializable cause', async () => {
