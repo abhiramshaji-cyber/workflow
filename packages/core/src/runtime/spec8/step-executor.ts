@@ -1310,7 +1310,7 @@ export async function executeStep(
 
       const thrown =
         'unwrapped' in normalizedError
-          ? normalizedError.unwrapped
+          ? promoteAbortErrorToFatal(normalizedError.unwrapped)
           : effectiveErr;
 
       const dehydrateFailure = async (
@@ -1343,20 +1343,20 @@ export async function executeStep(
         }
       };
 
-      if (effectiveErr instanceof Error) {
-        span?.recordException?.(effectiveErr);
+      if (thrown instanceof Error) {
+        span?.recordException?.(thrown);
       }
 
-      const isFatal = FatalError.is(effectiveErr);
+      const isFatal = FatalError.is(thrown);
 
       span?.setAttributes({
-        ...Attribute.StepErrorName(getErrorName(effectiveErr)),
+        ...Attribute.StepErrorName(getErrorName(thrown)),
         ...Attribute.StepErrorMessage(normalizedError.message),
-        ...Attribute.ErrorType(getErrorName(effectiveErr)),
+        ...Attribute.ErrorType(getErrorName(thrown)),
         ...Attribute.ErrorCategory(
           isFatal
             ? 'fatal'
-            : RetryableError.is(effectiveErr)
+            : RetryableError.is(thrown)
               ? 'retryable'
               : 'transient'
         ),
@@ -1381,8 +1381,8 @@ export async function executeStep(
         // error preserves it for consumers. `types.isNativeError()` works
         // across VM realms (a workflow-thrown error is an instance of the
         // VM's Error class, not the host's).
-        if (types.isNativeError(effectiveErr) && normalizedStack) {
-          setErrorStack(effectiveErr, normalizedStack);
+        if (types.isNativeError(thrown) && normalizedStack) {
+          setErrorStack(thrown, normalizedStack);
         }
         try {
           await createEvent(
@@ -1495,12 +1495,12 @@ export async function executeStep(
       }
 
       // Retries remaining
-      if (RetryableError.is(err)) {
+      if (RetryableError.is(thrown)) {
         stepLogger.info('Encountered RetryableError, step will be retried', {
           workflowRunId,
           stepName,
           attempt: currentAttempt,
-          message: err.message,
+          message: thrown.message,
         });
       } else {
         stepLogger.info('Encountered Error, step will be retried', {
@@ -1514,8 +1514,8 @@ export async function executeStep(
       // Apply the normalized stack to the thrown value so it survives
       // serialization. See the FatalError site above for why we use
       // `types.isNativeError` instead of `err instanceof Error`.
-      if (types.isNativeError(err) && normalizedStack) {
-        setErrorStack(err, normalizedStack);
+      if (types.isNativeError(thrown) && normalizedStack) {
+        setErrorStack(thrown, normalizedStack);
       }
       try {
         await createEvent({
@@ -1528,7 +1528,7 @@ export async function executeStep(
               ...normalizedError,
               stack: normalizedStack,
             }),
-            ...(RetryableError.is(err) && { retryAfter: err.retryAfter }),
+            ...(RetryableError.is(thrown) && { retryAfter: thrown.retryAfter }),
           },
         });
       } catch (stepRetryErr) {
@@ -1549,8 +1549,8 @@ export async function executeStep(
 
       const timeoutSeconds = Math.max(
         1,
-        RetryableError.is(err)
-          ? Math.ceil((+err.retryAfter.getTime() - Date.now()) / 1000)
+        RetryableError.is(thrown)
+          ? Math.ceil((+thrown.retryAfter.getTime() - Date.now()) / 1000)
           : 1
       );
 

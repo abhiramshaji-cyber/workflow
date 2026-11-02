@@ -1127,6 +1127,37 @@ describe('executeStep — thrown errors with a read-only stack', () => {
     );
   });
 
+  const rejected = (reason: unknown) => {
+    const thrown = Promise.reject(reason);
+    thrown.catch(() => {});
+    return thrown;
+  };
+
+  it('fails without retrying when the step throws a promise rejected with a FatalError', async () => {
+    const { world, runId, stepId, result } = await runThrowingStep(() =>
+      rejected(new FatalError('card declined'))
+    );
+
+    expect(result.type).toBe('failed');
+    expect(await eventsFor(world, runId, stepId, 'step_retrying')).toHaveLength(
+      0
+    );
+    const hydrated = await hydratedErrorOf(world, runId, stepId, 'step_failed');
+    expect(FatalError.is(hydrated)).toBe(true);
+    expect(hydrated.message).toBe('card declined');
+  });
+
+  it('waits for retryAfter when the step throws a promise rejected with a RetryableError', async () => {
+    const { result } = await runThrowingStep(() =>
+      rejected(new RetryableError('rate limited', { retryAfter: 60_000 }))
+    );
+
+    expect(result).toMatchObject({ type: 'retry' });
+    expect(
+      (result as { timeoutSeconds: number }).timeoutSeconds
+    ).toBeGreaterThanOrEqual(59);
+  });
+
   it('records a retry when an unserializable cause sits under a very deep chain', async () => {
     const { world, runId, stepId, result } = await runThrowingStep(() => {
       let error: Error = Object.assign(new Error('leaf'), {

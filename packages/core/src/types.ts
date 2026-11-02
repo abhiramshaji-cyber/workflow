@@ -246,7 +246,8 @@ function isPrimitive(value: unknown): boolean {
 export function toPlainError(
   value: unknown,
   normalized: NormalizedUnknownError,
-  path: unknown[] = []
+  path: unknown[] = [],
+  copies = new Map<unknown, Error>()
 ): Error {
   const expand =
     typeof value === 'object' &&
@@ -265,7 +266,8 @@ export function toPlainError(
   const reduce = (link: unknown): unknown =>
     isPrimitive(link)
       ? link
-      : toPlainError(link, normalizeSyncError(link), path);
+      : (copies.get(link) ??
+        toPlainError(link, normalizeSyncError(link), path, copies));
   const cause = readProperty(value, 'cause');
   if (cause !== undefined) Object.assign(error, { cause: reduce(cause) });
   // the AggregateError reviver throws when errors is missing
@@ -273,6 +275,7 @@ export function toPlainError(
     Object.assign(error, { errors: readErrors(value).map(reduce) });
   }
   path.pop();
+  copies.set(value, error);
   return error;
 }
 

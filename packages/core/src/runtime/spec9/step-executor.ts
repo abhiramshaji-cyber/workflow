@@ -950,7 +950,7 @@ export async function executeStep(
 
       const thrown =
         'unwrapped' in normalizedError
-          ? normalizedError.unwrapped
+          ? promoteAbortErrorToFatal(normalizedError.unwrapped)
           : effectiveErr;
 
       const dehydrateFailure = async (
@@ -983,20 +983,20 @@ export async function executeStep(
         }
       };
 
-      if (effectiveErr instanceof Error) {
-        span?.recordException?.(effectiveErr);
+      if (thrown instanceof Error) {
+        span?.recordException?.(thrown);
       }
 
-      const isFatal = FatalError.is(effectiveErr);
+      const isFatal = FatalError.is(thrown);
 
       span?.setAttributes({
-        ...Attribute.StepErrorName(getErrorName(effectiveErr)),
+        ...Attribute.StepErrorName(getErrorName(thrown)),
         ...Attribute.StepErrorMessage(normalizedError.message),
-        ...Attribute.ErrorType(getErrorName(effectiveErr)),
+        ...Attribute.ErrorType(getErrorName(thrown)),
         ...Attribute.ErrorCategory(
           isFatal
             ? 'fatal'
-            : RetryableError.is(effectiveErr)
+            : RetryableError.is(thrown)
               ? 'retryable'
               : 'transient'
         ),
@@ -1059,8 +1059,8 @@ export async function executeStep(
           'Encountered FatalError while executing step, bubbling up to parent workflow',
           { workflowRunId, stepName, errorStack: normalizedStack }
         );
-        if (types.isNativeError(effectiveErr) && normalizedStack) {
-          setErrorStack(effectiveErr, normalizedStack);
+        if (types.isNativeError(thrown) && normalizedStack) {
+          setErrorStack(thrown, normalizedStack);
         }
         return writeFailed(
           thrown,
@@ -1101,8 +1101,8 @@ export async function executeStep(
         );
       }
 
-      const retryAt = RetryableError.is(err)
-        ? new Date(err.retryAfter)
+      const retryAt = RetryableError.is(thrown)
+        ? new Date(thrown.retryAfter)
         : new Date(Date.now() + 1000);
       if (params.retryOutlivesMessage?.(retryAt.getTime())) {
         stepLogger.error(
@@ -1114,12 +1114,12 @@ export async function executeStep(
         );
       }
 
-      if (RetryableError.is(err)) {
+      if (RetryableError.is(thrown)) {
         stepLogger.info('Encountered RetryableError, step will be retried', {
           workflowRunId,
           stepName,
           attempt,
-          message: err.message,
+          message: thrown.message,
         });
       } else {
         stepLogger.info('Encountered Error, step will be retried', {
@@ -1130,8 +1130,8 @@ export async function executeStep(
         });
       }
 
-      if (types.isNativeError(err) && normalizedStack) {
-        setErrorStack(err, normalizedStack);
+      if (types.isNativeError(thrown) && normalizedStack) {
+        setErrorStack(thrown, normalizedStack);
       }
       let retrying: EventResult;
       try {

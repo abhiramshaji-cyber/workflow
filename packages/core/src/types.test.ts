@@ -444,6 +444,30 @@ describe('toPlainError', () => {
     }
   });
 
+  it('copies a member shared across nested aggregates once', () => {
+    let level: Error = new TypeError('timeout');
+    for (let depth = 0; depth < 4; depth++) {
+      level = new AggregateError(Array(40).fill(level), `level ${depth}`);
+    }
+
+    const started = performance.now();
+    const plain = toPlainError(level, describeAs(level)) as AggregateError;
+    expect(performance.now() - started).toBeLessThan(1_000);
+
+    const copies = new Set<unknown>();
+    const visit = (value: unknown) => {
+      if (copies.has(value) || !(value instanceof Error)) return;
+      copies.add(value);
+      for (const member of (value as AggregateError).errors ?? []) {
+        visit(member);
+      }
+    };
+    visit(plain);
+    expect(copies.size).toBe(4 + 40);
+    expect(new Set(plain.errors).size).toBe(1);
+    expect((plain.errors[0] as AggregateError).errors).toHaveLength(40);
+  });
+
   it('stops a very deep cause chain after a few links', () => {
     let error = new Error('root');
     for (let link = 0; link < 50_000; link++) {
