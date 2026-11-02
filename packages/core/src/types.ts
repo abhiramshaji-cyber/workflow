@@ -1,5 +1,6 @@
 import { types } from 'node:util';
 import { FatalError } from '@workflow/errors';
+import { envNumber } from '@workflow/world/env-config';
 
 export function getErrorName(v: unknown): string {
   if (types.isNativeError(v)) {
@@ -139,7 +140,7 @@ export interface NormalizedUnknownError {
   stack: string;
 }
 
-const THENABLE_DEADLINE_MS = 1000;
+const THROWN_THENABLE_TIMEOUT_MS = 10_000;
 const THENABLE_MAX_DEPTH = 8;
 
 type Then = (
@@ -205,13 +206,11 @@ function normalizeSyncError(v: unknown): NormalizedUnknownError {
   };
 }
 
-function readErrors(value: unknown): unknown[] {
-  if (typeof value !== 'object' || value === null) return [];
+function readProperty(value: object, key: 'cause' | 'errors'): unknown {
   try {
-    const errors = (value as { errors?: unknown }).errors;
-    return Array.isArray(errors) ? errors : [];
+    return (value as Record<string, unknown>)[key];
   } catch {
-    return [];
+    return undefined;
   }
 }
 
@@ -228,18 +227,29 @@ export function toPlainError(
   seen = new WeakSet<object>()
 ): Error {
   const error = Object.assign(new Error(message), { name, stack });
-  if (name !== 'AggregateError') return error;
+  if (typeof value !== 'object' || value === null) return error;
+  seen.add(value);
 
-  // the AggregateError reviver throws when errors is missing
-  if (typeof value === 'object' && value !== null) seen.add(value);
-  const errors = readErrors(value).map((member) => {
+  const reduce = (member: unknown): unknown => {
     if (isPrimitive(member)) return member;
     const normalized = normalizeSyncError(member);
     return seen.has(member as object)
-      ? toPlainError(member, { ...normalized, name: 'Error' }, seen)
+      ? Object.assign(new Error(normalized.message), {
+          name: 'Error',
+          stack: normalized.stack,
+        })
       : toPlainError(member, normalized, seen);
+  };
+
+  const cause = readProperty(value, 'cause');
+  if (cause !== undefined) Object.assign(error, { cause: reduce(cause) });
+  if (name !== 'AggregateError') return error;
+
+  // the AggregateError reviver throws when errors is missing
+  const errors = readProperty(value, 'errors');
+  return Object.assign(error, {
+    errors: Array.isArray(errors) ? errors.map(reduce) : [],
   });
-  return Object.assign(error, { errors });
 }
 
 function promiseRejection(message: string): NormalizedUnknownError {
@@ -257,9 +267,14 @@ export async function normalizeUnknownError(
   let then = getThen(value);
   if (!then) return normalizeSyncError(value);
 
+  const timeoutMs = envNumber(
+    'WORKFLOW_THROWN_THENABLE_TIMEOUT_MS',
+    THROWN_THENABLE_TIMEOUT_MS,
+    { integer: true, min: 1 }
+  );
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<undefined>((resolve) => {
-    timer = setTimeout(() => resolve(undefined), THENABLE_DEADLINE_MS);
+    timer = setTimeout(() => resolve(undefined), timeoutMs);
   });
 
   try {
@@ -268,7 +283,7 @@ export async function normalizeUnknownError(
       const settled = await Promise.race([settle(current, then), deadline]);
       if (!settled) {
         return promiseRejection(
-          `thrown thenable did not settle within ${THENABLE_DEADLINE_MS}ms`
+          `thrown thenable did not settle within ${timeoutMs}ms`
         );
       }
       current = settled.value;

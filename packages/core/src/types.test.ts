@@ -7,6 +7,7 @@ import {
   isAbortError,
   normalizeUnknownError,
   promoteAbortErrorToFatal,
+  toPlainError,
 } from './types.js';
 
 describe('getErrorMessage', () => {
@@ -218,6 +219,7 @@ describe('formatErrorCauseChain', () => {
 describe('normalizeUnknownError', () => {
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
   });
 
   it('describes a rejected promise by its reason', async () => {
@@ -244,6 +246,33 @@ describe('normalizeUnknownError', () => {
     await vi.runAllTimersAsync();
     await expect(normalized).resolves.toMatchObject({
       message: expect.stringMatching(/did not settle/),
+    });
+  });
+
+  it('waits for a thrown promise that settles after a few seconds', async () => {
+    vi.useFakeTimers();
+    const thrown = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('slow error body')), 5_000);
+    });
+    thrown.catch(() => {});
+    const normalized = normalizeUnknownError(thrown);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(normalized).resolves.toMatchObject({
+      message: 'Promise rejection: slow error body',
+    });
+  });
+
+  it('reads the settle limit from WORKFLOW_THROWN_THENABLE_TIMEOUT_MS', async () => {
+    vi.useFakeTimers();
+    vi.stubEnv('WORKFLOW_THROWN_THENABLE_TIMEOUT_MS', '30000');
+    const thrown = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('very slow error body')), 20_000);
+    });
+    thrown.catch(() => {});
+    const normalized = normalizeUnknownError(thrown);
+    await vi.advanceTimersByTimeAsync(20_000);
+    await expect(normalized).resolves.toMatchObject({
+      message: 'Promise rejection: very slow error body',
     });
   });
 
@@ -296,5 +325,80 @@ describe('normalizeUnknownError', () => {
       name: 'Error',
       message: expect.any(String),
     });
+  });
+});
+
+describe('toPlainError', () => {
+  const describeAs = (error: Error) => ({
+    name: error.name,
+    message: error.message,
+    stack: '',
+  });
+
+  it('keeps the members of a nested aggregate', () => {
+    const inner = new AggregateError(
+      [new Error('ipv4 refused'), new Error('ipv6 refused')],
+      'connect failed'
+    );
+    const outer = new AggregateError([inner], 'all upstreams failed');
+
+    const plain = toPlainError(outer, describeAs(outer)) as AggregateError;
+    const member = plain.errors[0] as AggregateError;
+    expect(member.name).toBe('AggregateError');
+    expect(member.errors.map((error: Error) => error.message)).toEqual([
+      'ipv4 refused',
+      'ipv6 refused',
+    ]);
+  });
+
+  it('describes a cause that is not an error', () => {
+    const error = new Error('upstream returned 503', {
+      cause: { status: 503 },
+    });
+    const primitive = new Error('upstream returned 503', { cause: 'busy' });
+
+    expect(toPlainError(error, describeAs(error)).cause).toMatchObject({
+      name: 'Error',
+      message: '{"status":503}',
+    });
+    expect(toPlainError(primitive, describeAs(primitive)).cause).toBe('busy');
+  });
+
+  it('skips a cause whose getter throws', () => {
+    const error = Object.defineProperty(new Error('outer'), 'cause', {
+      get() {
+        throw new Error('getter exploded');
+      },
+    });
+
+    expect(toPlainError(error, describeAs(error)).cause).toBeUndefined();
+  });
+
+  it('keeps a cyclic cause chain finite', () => {
+    const first = new Error('first');
+    const second = new Error('second', { cause: first });
+    first.cause = second;
+
+    const plain = toPlainError(first, describeAs(first));
+    const cause = plain.cause as Error;
+    expect(cause.message).toBe('second');
+    expect((cause.cause as Error).message).toBe('first');
+    expect((cause.cause as Error).cause).toBeUndefined();
+  });
+
+  it('keeps an aggregate that contains itself finite', () => {
+    const aggregate = new AggregateError([], 'all failed');
+    aggregate.errors.push(aggregate);
+
+    const plain = toPlainError(
+      aggregate,
+      describeAs(aggregate)
+    ) as AggregateError;
+    expect(plain.errors).toHaveLength(1);
+    expect(plain.errors[0]).toMatchObject({
+      name: 'Error',
+      message: 'all failed',
+    });
+    expect(plain.errors[0].errors).toBeUndefined();
   });
 });

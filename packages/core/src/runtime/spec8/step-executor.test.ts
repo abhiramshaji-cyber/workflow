@@ -1387,19 +1387,24 @@ describe('executeStep — thrown errors with a read-only stack', () => {
   });
 
   it('records a retry when the step throws a thenable that never settles', async () => {
-    const { world, runId, stepId, result } = await runThrowingStep(() => ({
-      // biome-ignore lint/suspicious/noThenProperty: Intentionally thenable
-      then() {},
-    }));
+    vi.stubEnv('WORKFLOW_THROWN_THENABLE_TIMEOUT_MS', '50');
+    try {
+      const { world, runId, stepId, result } = await runThrowingStep(() => ({
+        // biome-ignore lint/suspicious/noThenProperty: Intentionally thenable
+        then() {},
+      }));
 
-    expect(result.type).toBe('retry');
-    const hydrated = await hydratedErrorOf(
-      world,
-      runId,
-      stepId,
-      'step_retrying'
-    );
-    expect(hydrated.message).toMatch(/did not settle/);
+      expect(result.type).toBe('retry');
+      const hydrated = await hydratedErrorOf(
+        world,
+        runId,
+        stepId,
+        'step_retrying'
+      );
+      expect(hydrated.message).toMatch(/did not settle within 50ms/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('records a retry when the step throws a thenable that resolves to itself', async () => {
@@ -1432,6 +1437,7 @@ describe('executeStep — thrown errors with a read-only stack', () => {
       'step_retrying'
     );
     expect(hydrated.message).toBe('upstream returned 503');
+    expect((hydrated.cause as Error).message).toBe('{"status":503}');
   });
 
   it('records a fatal failure when the cause cannot be serialized', async () => {
@@ -1467,7 +1473,37 @@ describe('executeStep — thrown errors with a read-only stack', () => {
     expect(hydrated).toBeInstanceOf(AggregateError);
     expect(hydrated.message).toBe('all upstreams failed');
     expect(hydrated.errors).toHaveLength(2);
+    expect(hydrated.errors[0].message).toBe('{"status":503}');
     expect(hydrated.errors[1].message).toBe('timeout');
+    expect((hydrated.cause as Error).message).toBe('{"status":503}');
+  });
+
+  it('records a retry with the cause chain of an aggregate member', async () => {
+    const { world, runId, stepId, result } = await runThrowingStep(
+      () =>
+        new AggregateError(
+          [
+            new Error('timeout', {
+              cause: new Error('socket hang up', { cause: new ApiResponse() }),
+            }),
+          ],
+          'all upstreams failed'
+        )
+    );
+
+    expect(result.type).toBe('retry');
+    const hydrated = (await hydratedErrorOf(
+      world,
+      runId,
+      stepId,
+      'step_retrying'
+    )) as AggregateError;
+    const member = hydrated.errors[0] as Error;
+    expect(member.message).toBe('timeout');
+    expect((member.cause as Error).message).toBe('socket hang up');
+    expect(((member.cause as Error).cause as Error).message).toBe(
+      '{"status":503}'
+    );
   });
 
   it('records the final failure when the last attempt throws an unserializable cause', async () => {
